@@ -44,18 +44,20 @@
 - In Codex shell sessions, do not assume JS tooling is on `PATH`. For `node`, `npm`, and `bun`, prefer `PATH="/opt/homebrew/bin:$HOME/.bun/bin:$PATH"`.
 - Prefer existing utilities, framework APIs, and the standard library before adding dependencies.
 - Do not add new production or tooling dependencies without explicit user approval unless the user directly requested that dependency by name.
-- Before using a new library, inspect the relevant `package.json`. Prefer installed libraries such as Zod, TanStack Query, TanStack Form, Hono, Prisma, Expo, and `@teraso-crm/contracts`.
+- Before using a new library, inspect the relevant `package.json`. Prefer installed libraries such as Zod, TanStack Query, TanStack Form, Hono, Prisma, and `@teraso-crm/contracts`. Expo belongs to the deferred `mobile` surface and is not installed in this repository.
 - If a missing dependency clearly improves the product outcome, explain the user-visible reason, maintenance/security impact, and ask before installing.
 - Before using framework-specific APIs, check current official docs, local package types, or existing examples.
-- For E2E, use Playwright for web and Maestro for mobile. Read `docs/TESTING.md` before adding flows.
-- For mobile E2E selectors, prefer stable React Native `testID` constants from `mobile/src/constants/testIds.ts`; avoid coordinates and fragile text selectors.
-- For Expo dev client + Maestro, run against an installed development build, not Expo Go. Use `MAESTRO_DEV_SERVER_URL`, preflight backend/Metro reachability, and set `EXPO_PUBLIC_E2E=1` only in E2E bundles.
-- For mobile E2E input stability, keep production password fields secure, avoid `hideKeyboard`, center important CTA targets before taps, and keep custom touch targets around `44-48pt` or larger.
-- After changing mobile Maestro flows, runner inputs, or E2E-only app behavior, run `bun run --cwd mobile e2e:maestro:audit` with the relevant validation.
+- For E2E, use Playwright for the web surfaces. Read `docs/TESTING.md` before adding flows.
+- The mobile E2E rules below apply only to the deferred `mobile` surface. That directory currently holds `mobile/README.md` alone and is not a Bun workspace, so the paths and scripts they name do not exist until mobile is activated. Keep the rules; do not act on them now.
+  - Use Maestro for mobile E2E.
+  - For mobile E2E selectors, prefer stable React Native `testID` constants from `mobile/src/constants/testIds.ts`; avoid coordinates and fragile text selectors.
+  - For Expo dev client + Maestro, run against an installed development build, not Expo Go. Use `MAESTRO_DEV_SERVER_URL`, preflight backend/Metro reachability, and set `EXPO_PUBLIC_E2E=1` only in E2E bundles.
+  - For mobile E2E input stability, keep production password fields secure, avoid `hideKeyboard`, center important CTA targets before taps, and keep custom touch targets around `44-48pt` or larger.
+  - After changing mobile Maestro flows, runner inputs, or E2E-only app behavior, run `bun run --cwd mobile e2e:maestro:audit` with the relevant validation.
 
 ## Project Context
 
-- Use `README.md` as the source of truth for first-run repository download, bootstrap, and product intake instructions.
+- Use `README.md` as the source of truth for this project's durable decisions: active and deferred surfaces, local database workflow, validation scope, naming conventions, and what is out of MVP scope. Setup is already complete; there is no first-run bootstrap left to perform.
 - Keep durable project choices in README files and docs, not in this agent file.
 - Infrastructure, deployment, storage, local database, testing runbooks, and provider-specific choices live in `README.md` and `docs/`.
 - When a surface is deferred, prefer a short note in that surface's README over extra agent instructions.
@@ -73,13 +75,11 @@
 
 ## Git And Remote Policy
 
-- Inspect `git remote -v` before any branch, commit, push, or PR workflow.
-- Work on `master` unless explicitly told otherwise. Do not create, switch to, or suggest new branches without request.
-- Treat this repository as a template for a new project by default, not as a pull request source for the template.
-- If `origin` points to the template repository and the user has not explicitly said they are contributing to the template, remove it with `git remote remove origin`.
-- Add the user's own GitHub repository as `origin` only when the user provides a URL or asks to create/publish the project.
-- If no destination is chosen, leave the project without `origin` and report that publishing is not configured.
-- Do not push, open PRs, or configure deployment from the template remote by accident.
+- Work on `main`. Do not create, switch to, or suggest new branches without request. The user has approved committing directly to `main` for this project.
+- This repository has no Git remote, and that is intentional. `git remote -v` is empty.
+- Do not add a remote, push, or open pull requests. Repository publication is out of MVP scope; if the user later wants to publish, they must ask for it explicitly and provide the destination.
+- Inspect `git status --short --branch` before committing so unrelated or generated files are not swept into a commit.
+- Never commit `backend/.env`, `webapp/.env`, `node_modules/`, `.DS_Store`, `.scratch/`, or `backend/src/generated/`. `.gitignore` already covers them; verify with `git diff --cached --name-only` rather than assuming.
 
 ## Task Modes
 

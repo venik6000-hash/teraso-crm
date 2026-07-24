@@ -1,9 +1,5 @@
 # Teraso CRM
 
-<p align="center">
-  <img src="docs/assets/vibe_tmpl_schema.png" alt="Vibe Coding Template architecture schema" width="100%">
-</p>
-
 Teraso CRM is the internal sales CRM for Teraso (teraso.com.ua), a Ukrainian decking company. One repository holds a Bun/Hono backend, a React CSR browser client (`webapp`), and shared API contracts. The interface language is Russian.
 
 This repository was initialized from the [Vibe Coding Template](https://github.com/di-sukharev/vibe) by Dima Sukharev and keeps its Apache-2.0 [LICENSE](LICENSE) and [NOTICE](NOTICE) attribution. Setup is complete: this is a real project, not a fresh template checkout.
@@ -11,9 +7,10 @@ This repository was initialized from the [Vibe Coding Template](https://github.c
 ## Project Setup Decisions
 
 - Project name and slug: `teraso-crm`. The development database is `teraso_crm`, the test database is `teraso_crm_test`, the refresh cookie prefix is `teraso_crm`, and the OpenAPI title is `Teraso CRM API`.
+- Identifier separator convention, so new identifiers do not drift: use kebab + colon for cryptographic domain separators (`teraso-crm:refresh-rotation:v1`), and `teraso_crm_*` snake case for browser storage keys, cookies, and cache names (`teraso_crm_refresh`, `teraso_crm_theme`). Package scopes are kebab (`@teraso-crm/*`); PostgreSQL databases are snake (`teraso_crm`).
 - Active surfaces are `webapp`, `backend` and `packages/contracts`.
 - Deferred surfaces are `website` and `mobile`. They stay on disk untouched; do not configure, run, or extend them until they are explicitly requested.
-- PostgreSQL runs locally through Docker Compose, using the `postgres` and `postgres_test` services in `docker-compose.yml`. There is no native PostgreSQL install and no cloud database in local development.
+- PostgreSQL runs locally through Docker Compose. Start the `postgres` service by hand; the `postgres_test` service belongs to the test runners and must never be started manually. See "Local PostgreSQL And The Compose Project Trap". There is no native PostgreSQL install and no cloud database in local development.
 - Deployment is outside MVP. No cloud account setup, no production secrets, and no remote Git publication are in scope. `.do/` specs and `docs/DEPLOYMENT.md` stay committed for a later release decision.
 - Validation scope for the active surfaces: `bun run test:contracts`, `bun run architecture:check`, `bun run test:backend`, `bun run test:webapp`, and `bun run typecheck`.
 - Business rules that apply repository-wide: all UI copy, stage labels, task types, loss reasons, and validation feedback are in Russian; the business time zone is Europe/Kyiv; money is stored as PostgreSQL `Decimal(14,2)` and exposed as decimal strings in UAH.
@@ -23,26 +20,21 @@ This repository was initialized from the [Vibe Coding Template](https://github.c
 
 - `backend` - Bun + Hono + Prisma + PostgreSQL, custom JWT auth, Zod validation, and OpenAPI output.
 - `webapp` - React + Vite + TanStack Query/Form/Router CSR browser client with the baseline auth flow.
-- `website` - a separate Astro project for public SSG/SSR pages (landing, content sites, marketplace).
-- `mobile/README.md` - pointer to the runnable Expo mobile template on the `mobile` branch.
 - `packages/contracts` - shared Zod schemas and TypeScript API types.
-- `.do` - committed DigitalOcean App Platform spec templates; generate concrete specs into `.scratch/deploy` with `bun run deploy:do:specs`.
 - `docker-compose.yml` - local PostgreSQL 18 through the official `postgres:18-alpine` image on port `54329`; test runners use a repository-derived port by default, or `POSTGRES_TEST_PORT` when set. PostgreSQL 18 is intentional because the backend schema uses strict database-generated UUIDv7 IDs.
-- `docs/TESTING.md` - the backend and Playwright testing contract. Mobile Maestro guidance lives on the `mobile` branch.
+- `docs/TESTING.md` - the backend and Playwright testing contract.
 - `docs/LOCAL_DATABASE.md` - cross-platform local PostgreSQL setup for Windows, macOS, and Linux.
-- `docs/STORAGE.md` - DigitalOcean Spaces, CDN, uploads, and image/media storage rules.
-- `docs/YANDEX_CLOUD.md` - optional Yandex Cloud deployment path when the user explicitly chooses it.
+- `website` - a separate Astro project for public SSG/SSR pages. **(deferred surface)**
+- `mobile/README.md` - a pointer to the upstream template's Expo mobile line. **(deferred surface)** This repository has a single branch, `main`; the `mobile` branch it describes exists only in the upstream template repository, which is not configured as a remote here.
+- `.do` - committed DigitalOcean App Platform spec templates. **(deployment is out of MVP scope)**
+- `docs/STORAGE.md` - DigitalOcean Spaces, CDN, uploads, and image/media storage rules. **(deployment is out of MVP scope)**
+- `docs/YANDEX_CLOUD.md` - optional Yandex Cloud deployment path. **(deployment is out of MVP scope)**
 
-## Choosing `webapp` vs `website`
+## Browser Surfaces: `webapp` Only
 
-This template ships two browser surfaces. Putting a feature in the wrong one is the most common early mistake, so the installing agent must pick deliberately and explain the choice in product terms the user understands.
+**This decision is already made. Build every screen in `webapp`.** Teraso CRM is an internal tool: every screen sits behind sign-in, nothing needs to be indexed by search engines or preview nicely when shared, so client-side rendering is the right and cheaper fit. Do not add pages to `website`, and do not weigh the two surfaces against each other when planning a feature.
 
-- Build it in **`website`** (Astro, static by default, SSR/hybrid only when needed) when pages must be **public and found by search engines or shared with rich link previews**: marketing/landing pages, content sites, blogs, docs, and the public storefront of a **marketplace**. For a marketplace, this usually means the landing page, category/search landing pages, public listing/product pages, SEO metadata, and rich previews.
-- Build it in **`webapp`** (React, client-side rendered) when screens live **behind sign-in and do not need SEO**: login-adjacent app flows after redirect, buyer account, seller/admin panels, checkout/account workflows, dashboards, settings, and authenticated tools. No crawler needs these, so CSR is the simpler, cheaper choice.
-
-Rule of thumb for the agent: *if a page must rank in search or preview nicely when shared, it belongs in `website`; if it is only reachable after login, it belongs in `webapp`.* Real marketplaces normally use **both**: the public catalog lives in `website`, the authenticated app lives in `webapp`, and both reuse the same `@teraso-crm/contracts` schemas. Do not rebuild SEO pages inside `webapp` to "keep everything in one app"; that loses the SEO the product needs. Do not move the full authenticated app into Astro just because the product has public SEO pages.
-
-Astro stays the default website stack for this template because it is content-first, static-first, ships little JavaScript by default, and gives agents a clear SEO surface. Choose Next.js only when the project intentionally wants a Vercel-optimized ISR/cache platform as a core product requirement. Treat TanStack Start as an optional future React full-stack path for teams that want one React app with selective SSR; it is not the simple default for non-programmer vibe-coding projects.
+`website` (Astro) is deferred and stays on disk unconfigured. The upstream template's rule for it — public, search-indexable, link-previewed pages belong in Astro; behind-login screens belong in React CSR — is recorded here only so a future public marketing site can be decided deliberately. Until someone explicitly asks for that site, the rule has no bearing on this project: there are no public pages in the MVP.
 
 ## Quick Start
 
@@ -52,7 +44,7 @@ Install dependencies first:
 bun install
 ```
 
-If backend/API, full-stack, or other database-backed work is active, check Docker first. Docker is the local app that runs PostgreSQL for this template:
+Docker runs the local PostgreSQL for this project, so check it before any database-backed work:
 
 ```bash
 docker compose version
@@ -65,11 +57,9 @@ If either command fails, install and start Docker before continuing:
 - macOS: install and start Docker Desktop, or another Docker Engine with Compose v2, then rerun `docker compose version` and `docker info`.
 - Linux: install Docker Engine and the Docker Compose plugin, start the Docker service, then rerun `docker compose version` and `docker info`.
 
-Do not switch new users to native PostgreSQL during local setup. The repository's documented local path is Docker Compose for backend/API work.
+Do not switch to native PostgreSQL. The documented local path for this project is Docker Compose.
 
-### Backend/API Or Full-Stack
-
-Only run this block when backend/API, full-stack, or DB-backed validation is active.
+### Database, Migrations, And The Local Administrator
 
 Create the backend env file:
 
@@ -83,16 +73,17 @@ cp backend/.env.example backend/.env
 Copy-Item backend/.env.example backend/.env
 ```
 
-Then start PostgreSQL with that app-local env file:
+Then start PostgreSQL with that app-local env file. Start `postgres` and nothing else:
 
 ```bash
 docker compose --env-file backend/.env pull postgres
 docker compose --env-file backend/.env up -d postgres
 ```
 
-Then apply migrations:
+Then generate the Prisma client and apply migrations. `prisma:generate` is required on a fresh checkout: without it the seed and every backend entrypoint fail with `Cannot find module './generated/prisma/client'`.
 
 ```bash
+bun run --cwd backend prisma:generate
 bun run --cwd backend prisma:deploy
 ```
 
@@ -109,17 +100,30 @@ password credential remains locked. Re-running the seed without a password never
 clears an existing password hash; re-running it with the already configured
 password preserves existing sessions.
 
+### Local PostgreSQL And The Compose Project Trap
+
+**Start `postgres` by hand. Never start `postgres_test` by hand.** Both services live in the same `docker-compose.yml`, but they are owned by different Docker Compose projects at runtime, and starting the test service manually breaks the test suite.
+
+- `docker compose --env-file backend/.env ...` uses the **directory-derived** project name. In this checkout the directory is `CRM Teraso`, so the project is `crmteraso` and the dev container is `crmteraso-postgres-1` on port `54329`. The development data — applied migrations and the seeded administrator — lives in the `crmteraso_postgres_18_data` volume owned by that project.
+- The test runners (`test:backend:integration`, `smoke:docker`, `e2e:webapp`) use the **repository-hash-derived** project name from `scripts/repo-env.mjs`, currently `teraso-crm-<repohash>`. They bring up their own `postgres_test`, choose its port, apply migrations to `teraso_crm_test`, and own its lifecycle.
+
+Two consequences worth internalizing:
+
+- Running `docker compose --env-file backend/.env up -d postgres_test` binds host port `54330` under the `crmteraso` project. The runner then tries to bind the same port under its own project and dies with `Bind for 127.0.0.1:54330 failed: port is already allocated`. If you ever see that error, remove the stray manual container: `docker compose --env-file backend/.env rm -f -s -v postgres_test`.
+- Never pass an explicit `-p` flag to the manual dev commands. A different project name silently creates a *second, empty* development database with no error, and the seeded administrator appears to vanish.
+
+To reset local development data, follow "Reset Local Data" in [docs/LOCAL_DATABASE.md](docs/LOCAL_DATABASE.md). Never run `docker compose down -v` against the dev project casually; it destroys the seeded administrator and every applied migration.
+
 ### Run The Active Surfaces
 
-Start only the app surfaces you need in separate terminals:
+Start the surfaces you need in separate terminals:
 
 ```bash
 bun run dev:backend
 bun run dev:webapp
-bun run dev:website
 ```
 
-Website-only setups can skip backend/PostgreSQL. A webapp-only project can skip it only after replacing or removing the included auth golden path; the committed webapp's register/login/session journey intentionally requires the backend.
+The webapp's register/login/session journey requires the backend and PostgreSQL, so run both together. `bun run dev:website` starts the deferred Astro surface and is not part of this project's workflow.
 
 Create `webapp/.env` when the browser client should use a non-default API URL:
 
@@ -127,23 +131,23 @@ Create `webapp/.env` when the browser client should use a non-default API URL:
 VITE_API_URL=http://localhost:3000
 ```
 
-Test runners use the separate Docker Compose `postgres_test` service and the `TEST_DATABASE_URL` shape from `backend/.env.example`. Webapp Playwright E2E starts `postgres_test`, applies migrations to `teraso_crm_test`, runs the browser flow, and tears down its test database volume by default.
-
 ## Workspace Commands
 
 - `bun run dev` - start all workspace projects in parallel dev mode.
 - `bun run dev:backend` - start the backend API.
 - `bun run dev:webapp` - start the Vite CSR webapp.
-- `bun run dev:website` - start the Astro website project.
+- `bun run dev:website` - start the Astro website project. **(deferred surface)**
 - `bun run typecheck` - run TypeScript checks across workspaces.
 - `bun run build` - run production build/typecheck/export scripts for workspaces that define them.
 - `bun run test` - run contract, backend, and webapp unit/integration tests.
 - `bun run test:contracts` - run shared Zod contract tests.
 - `bun run test:backend` - run backend unit and integration tests.
-- `bun run test:backend:integration` - run DB-backed auth tests through `postgres_test`.
+- `bun run test:backend:integration` - run DB-backed auth tests through a runner-owned `postgres_test`.
 - `bun run test:webapp` - run webapp client tests.
-- `bun run deploy:do:specs` - safely generate concrete DigitalOcean specs under `.scratch/deploy`.
+- `bun run test:website` - run Astro website tests. **(deferred surface)**
+- `bun run deploy:do:specs` - generate concrete DigitalOcean specs under `.scratch/deploy`. **(deployment is out of MVP scope)**
 - `bun run e2e:webapp` - run the Playwright auth smoke test through backend + Vite.
+- `bun run --cwd backend prisma:generate` - generate the Prisma client. Required on a fresh checkout.
 - `bun run --cwd backend prisma:migrate` - create/apply a Prisma migration in development.
 - `bun run --cwd backend prisma:deploy` - apply existing Prisma migrations on a server.
 - `bun run --cwd backend prisma:seed` - idempotently create or unlock the local administrator.
@@ -153,12 +157,12 @@ Test runners use the separate Docker Compose `postgres_test` service and the `TE
 
 - [backend/README.md](backend/README.md) - API, auth, Prisma, and backend validation.
 - [docs/LOCAL_DATABASE.md](docs/LOCAL_DATABASE.md) - Docker Compose PostgreSQL setup and reset workflow.
-- [docs/STORAGE.md](docs/STORAGE.md) - DigitalOcean Spaces, CDN, uploads, and image/media storage rules.
-- [docs/YANDEX_CLOUD.md](docs/YANDEX_CLOUD.md) - optional Yandex Cloud deployment path when explicitly selected.
 - [webapp/README.md](webapp/README.md) - CSR browser client setup, env, and Playwright smoke.
-- [mobile/README.md](mobile/README.md) - pointer to the full mobile template branch.
-- [website/README.md](website/README.md) - Astro website commands, hybrid rendering, and publishing model.
 - [packages/contracts/README.md](packages/contracts/README.md) - shared schema and DTO rules.
+- [docs/STORAGE.md](docs/STORAGE.md) - DigitalOcean Spaces, CDN, uploads, and image/media storage rules. **(deployment is out of MVP scope)**
+- [docs/YANDEX_CLOUD.md](docs/YANDEX_CLOUD.md) - optional Yandex Cloud deployment path. **(deployment is out of MVP scope)**
+- [website/README.md](website/README.md) - Astro website commands, hybrid rendering, and publishing model. **(deferred surface)**
+- [mobile/README.md](mobile/README.md) - pointer to the upstream template's mobile branch. **(deferred surface)**
 
 ## License
 
@@ -166,17 +170,17 @@ This project is licensed under the Apache License 2.0. If you distribute a fork,
 
 ## Architecture Notes
 
-API contracts live in `packages/contracts` and are imported by every active layer. The backend validates input with those Zod schemas, and the webapp client reuses the same schemas in TanStack Form and API calls. `UserDto.role` is the shared `user | admin` role contract; authorization uses the current database record rather than a role embedded in JWT claims. The `mobile` branch extends the same contract model for Expo.
+API contracts live in `packages/contracts` and are imported by every active layer. The backend validates input with those Zod schemas, and the webapp client reuses the same schemas in TanStack Form and API calls. `UserDto.role` is the shared `user | admin` role contract; authorization uses the current database record rather than a role embedded in JWT claims.
 
 The backend API flow is `route -> validation -> auth/session guard -> service -> Prisma -> DTO`. Routes stay thin, auth business logic lives in the feature service, and API, worker, and cron entrypoints share `src/runtime.ts` for env and Prisma setup.
 
-Keep the default architecture monolithic. For DigitalOcean production, the backend/API default is one `apps-s-1vcpu-1gb` App Platform container so a new project starts inside the expected low-cost budget with Managed PostgreSQL while retaining a clear scale-up path. Add backend worker or scheduled-job components from the same Docker image only when a concrete background or periodic task exists; the deployment generator refuses to deploy the empty worker placeholder. For real-time features, a single backend instance can own its local WebSocket connections. If the backend is horizontally scaled and users connected to different instances must receive the same chat, presence, or live events, add a managed Redis-compatible Pub/Sub broker between instances, using DigitalOcean Managed Valkey on the default path or Yandex Managed Service for Valkey when Yandex Cloud is explicitly selected.
+Keep the default architecture monolithic. The rest of this paragraph describes production deployment, which is **out of MVP scope**; it is retained for a later release decision. For DigitalOcean production, the backend/API default is one `apps-s-1vcpu-1gb` App Platform container so a new project starts inside the expected low-cost budget with Managed PostgreSQL while retaining a clear scale-up path. Add backend worker or scheduled-job components from the same Docker image only when a concrete background or periodic task exists; the deployment generator refuses to deploy the empty worker placeholder. For real-time features, a single backend instance can own its local WebSocket connections. If the backend is horizontally scaled and users connected to different instances must receive the same chat, presence, or live events, add a managed Redis-compatible Pub/Sub broker between instances, using DigitalOcean Managed Valkey on the default path or Yandex Managed Service for Valkey when Yandex Cloud is explicitly selected.
 
-Ongoing engineering guidance lives in [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/TESTING.md](docs/TESTING.md), and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). First-run download and product setup instructions live in this README.
+Ongoing engineering guidance lives in [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/TESTING.md](docs/TESTING.md), and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). This README owns the project's durable decisions and local setup: see "Project Setup Decisions" and "Quick Start".
 
 ## Current Upstream Documentation
 
-For framework, API, deployment, or testing questions, consult the current upstream documentation linked here first. The repository docs describe this template's conventions; the linked docs are the authoritative source for tool behavior and provider-specific changes.
+For framework, API, deployment, or testing questions, consult the current upstream documentation linked here first. The repository docs describe this project's conventions; the linked docs are the authoritative source for tool behavior and provider-specific changes.
 
 - Runtime and package manager: [Bun docs](https://bun.sh/docs)
 - Backend framework: [Hono docs](https://hono.dev/docs)

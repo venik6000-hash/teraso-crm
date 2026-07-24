@@ -85,13 +85,19 @@ If `54329` is already in use, change both `POSTGRES_PORT` and the port inside
 
 ## Test Database
 
-`postgres_test` is reserved for integration, Docker smoke, and Playwright flows:
+`postgres_test` is reserved for integration, Docker smoke, and Playwright flows, and **those runners own it**. Do not start it by hand.
+
+The runners bring `postgres_test` up under their own repository-hash-derived Compose project (see `scripts/repo-env.mjs`) and choose its port. Starting it manually with the directory-derived project instead:
 
 ```bash
+# DO NOT RUN. Binds port 54330 under the wrong Compose project and makes
+# `bun run test:backend:integration` fail with "port is already allocated".
 docker compose --env-file backend/.env up -d postgres_test
 ```
 
-Manual default connection:
+If that container already exists, remove it with `docker compose --env-file backend/.env rm -f -s -v postgres_test`. See "Local PostgreSQL And The Compose Project Trap" in the root [README.md](../README.md).
+
+Connection values the runners use by default:
 
 ```text
 host: localhost
