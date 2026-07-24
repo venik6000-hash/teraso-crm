@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  ACTIVE_DEAL_STAGES,
   dealActivityKindSchema,
   dealStageSchema,
   leadClassSchema,
@@ -7,6 +8,7 @@ import {
   materialSchema,
   notificationDeliveryStateSchema,
   notificationKindSchema,
+  OPEN_DEAL_STAGES,
   preferredChannelSchema,
   registerRequestSchema,
   taskKindSchema,
@@ -70,4 +72,29 @@ describe('CRM enum parity between contracts and Prisma', () => {
       expect(Object.values(prismaEnum)).toEqual([...zodValues])
     })
   }
+})
+
+/**
+ * The CRM deal list casts these constants straight into SQL to select open deals
+ * (`d.stage IN (...::deal_stage)`), so a stage the PostgreSQL enum does not
+ * contain would fail at query time on a live request rather than at build time.
+ * Membership is what matters here; the parity suite above already fixes order.
+ */
+describe('CRM stage constants against the PostgreSQL enum', () => {
+  const stages: string[] = Object.values(DealStage)
+
+  test('every open and active stage is a real DealStage member', () => {
+    expect(stages).toEqual(expect.arrayContaining([...OPEN_DEAL_STAGES]))
+    expect(stages).toEqual(expect.arrayContaining([...ACTIVE_DEAL_STAGES]))
+  })
+
+  /**
+   * PRD 7.4 exempts closed deals from the next-step rule, and the criticality
+   * domain derives that exemption from this constant rather than restating it.
+   */
+  test('closed stages stay outside the open set', () => {
+    expect(OPEN_DEAL_STAGES).not.toContain(DealStage.WON)
+    expect(OPEN_DEAL_STAGES).not.toContain(DealStage.LOST)
+    expect(ACTIVE_DEAL_STAGES).not.toContain(DealStage.LOST)
+  })
 })

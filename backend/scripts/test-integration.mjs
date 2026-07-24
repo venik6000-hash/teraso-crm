@@ -75,6 +75,7 @@ run(
     'test',
     'src/modules/auth/auth.integration.test.ts',
     'src/modules/users/users.integration.test.ts',
+    'src/modules/crm/crm.integration.test.ts',
   ],
   { env },
 )

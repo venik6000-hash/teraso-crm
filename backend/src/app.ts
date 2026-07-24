@@ -9,6 +9,7 @@ import type { AppEnv } from './env'
 import { errorResponse, handleError, validationErrorHook } from './http/errors'
 import { createAuthSecurity } from './http/security'
 import { createAuthModule, type AuthHttpEnv } from './modules/auth'
+import { createCrmModule } from './modules/crm'
 import { createUsersModule } from './modules/users'
 
 type CreateAppOptions = {
@@ -30,6 +31,7 @@ export function createApp({
     requireAdmin: auth.requireAdmin,
     requireAuth: auth.requireAuth,
   })
+  const crm = createCrmModule({ db: prisma, requireAuth: auth.requireAuth })
   const app = new OpenAPIHono<AuthHttpEnv>({
     defaultHook: validationErrorHook,
   })
@@ -73,6 +75,7 @@ export function createApp({
   })) {
     app.use('/api/users/*', middleware)
     app.use('/api/admin/*', middleware)
+    app.use('/api/crm/*', middleware)
   }
   app.get('/', (c) => {
     return c.json({
@@ -105,6 +108,7 @@ export function createApp({
   app.route('/api/auth', auth.routes)
   app.route('/api/users', users.userRoutes)
   app.route('/api/admin', users.adminRoutes)
+  app.route('/api/crm', crm)
 
   app.doc('/openapi.json', {
     openapi: '3.0.0',
