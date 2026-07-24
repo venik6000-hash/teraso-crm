@@ -17,6 +17,11 @@ model User {
   updatedAt    DateTime      @updatedAt @map("updated_at")
   sessions            AuthSession[]
   passwordResetTokens PasswordResetToken[]
+  responsibleDeals    Deal[]
+  assignedTasks       DealTask[]
+  authoredActivities  DealActivity[]
+  notifications       Notification[]
+  pushSubscriptions   PushSubscription[]
 
   @@index([role], map: "users_role_idx")
   @@map("users")
@@ -61,4 +66,302 @@ model AuthSession {
   @@index([userId], map: "auth_sessions_user_id_idx")
   @@index([expiresAt], map: "auth_sessions_expires_at_idx")
   @@map("auth_sessions")
+}
+
+// ---------------------------------------------------------------------------
+// CRM
+//
+// Every primary key follows the Vibe PostgreSQL UUIDv7 convention. CRM enums are
+// UPPERCASE and match packages/contracts/src/crm.ts character for character;
+// they deliberately do not follow the lowercase UserRole enum above.
+// ---------------------------------------------------------------------------
+
+/// A person, identified by one normalized international phone number, holding
+/// the whole history of their deals (PRD 5).
+model Client {
+  id              String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  name            String
+  phoneNormalized String   @unique @map("phone_normalized")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  deals           Deal[]
+
+  @@map("clients")
+}
+
+/// One sales attempt for a client. isCritical, noNextStep and hasOverdueTask are
+/// deliberately absent: they are functions of wall-clock time and are computed
+/// per request, so a stored column would be stale the moment nobody wrote to it.
+model Deal {
+  id                String            @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  clientId          String            @map("client_id") @db.Uuid
+  stage             DealStage         @default(NEW)
+  leadClass         LeadClass?        @map("lead_class")
+  lossReason        LossReason?       @map("loss_reason")
+  submittedAt       DateTime          @map("submitted_at")
+  source            String
+  form              String?
+  landingUrl        String?           @map("landing_url")
+  responsibleUserId String?           @map("responsible_user_id") @db.Uuid
+  material          Material?
+  areaLabel         String?           @map("area_label")
+  budgetLabel       String?           @map("budget_label")
+  /// Intentionally unenumerated free text: the business has not supplied a fixed
+  /// list of object types yet. Widen to an enum only after that input arrives.
+  objectType        String?           @map("object_type")
+  needTiming        String?           @map("need_timing")
+  preferredChannel  PreferredChannel? @map("preferred_channel")
+  potentialAmount   Decimal?          @map("potential_amount") @db.Decimal(14, 2)
+  prepaymentAmount  Decimal?          @map("prepayment_amount") @db.Decimal(14, 2)
+  prepaymentPaidAt  DateTime?         @map("prepayment_paid_at")
+  fullPaymentAmount Decimal?          @map("full_payment_amount") @db.Decimal(14, 2)
+  fullPaymentPaidAt DateTime?         @map("full_payment_paid_at")
+  currentNote       String?           @map("current_note")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  client            Client             @relation(fields: [clientId], references: [id], onDelete: Cascade, map: "deals_client_id_fkey")
+  responsibleUser   User?              @relation(fields: [responsibleUserId], references: [id], onDelete: SetNull, map: "deals_responsible_user_id_fkey")
+  tasks             DealTask[]
+  activities        DealActivity[]
+  attribution       LeadAttribution?
+  ingestionReceipts IngestionReceipt[]
+  notifications     Notification[]
+
+  @@index([stage, submittedAt], map: "deals_stage_submitted_at_idx")
+  @@index([clientId], map: "deals_client_id_idx")
+  @@index([responsibleUserId], map: "deals_responsible_user_id_idx")
+  @@index([submittedAt], map: "deals_submitted_at_idx")
+  @@index([source], map: "deals_source_idx")
+  @@map("deals")
+}
+
+/// The next step on a deal. The assignee defaults to the deal's responsible user
+/// at creation time and, like it, may be absent while nobody owns the deal.
+model DealTask {
+  id             String     @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  dealId         String     @map("deal_id") @db.Uuid
+  kind           TaskKind
+  title          String
+  dueAt          DateTime   @map("due_at")
+  status         TaskStatus @default(ACTIVE)
+  assigneeUserId String?    @map("assignee_user_id") @db.Uuid
+  completedAt    DateTime?  @map("completed_at")
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+
+  deal     Deal  @relation(fields: [dealId], references: [id], onDelete: Cascade, map: "deal_tasks_deal_id_fkey")
+  assignee User? @relation(fields: [assigneeUserId], references: [id], onDelete: SetNull, map: "deal_tasks_assignee_user_id_fkey")
+
+  @@index([status, dueAt], map: "deal_tasks_status_due_at_idx")
+  @@index([dealId, status, dueAt], map: "deal_tasks_deal_id_status_due_at_idx")
+  @@index([assigneeUserId, status], map: "deal_tasks_assignee_user_id_status_idx")
+  @@map("deal_tasks")
+}
+
+/// Append-only history. It carries no updatedAt because PRD 10 forbids editing
+/// the log after the fact. The author is null for system events such as the
+/// inbound webhook. metadata records before/after values and, for STAGE_CHANGED,
+/// the fromStage/toStage pair the dashboard funnel is aggregated from.
+model DealActivity {
+  id           String           @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  dealId       String           @map("deal_id") @db.Uuid
+  kind         DealActivityKind
+  text         String?
+  authorUserId String?          @map("author_user_id") @db.Uuid
+  metadata     Json?
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  deal   Deal  @relation(fields: [dealId], references: [id], onDelete: Cascade, map: "deal_activities_deal_id_fkey")
+  author User? @relation(fields: [authorUserId], references: [id], onDelete: SetNull, map: "deal_activities_author_user_id_fkey")
+
+  @@index([dealId, createdAt], map: "deal_activities_deal_id_created_at_idx")
+  @@index([kind, createdAt], map: "deal_activities_kind_created_at_idx")
+  @@map("deal_activities")
+}
+
+/// Raw marketing identifiers, kept apart from the deal's operational fields so
+/// they can never be mistaken for them. One row per deal: the dashboard joins it
+/// 1:1 when grouping sources, and a second submission on an open deal is
+/// recorded as an activity plus an ingestion receipt instead.
+model LeadAttribution {
+  id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  dealId      String   @unique(map: "lead_attributions_deal_id_key") @map("deal_id") @db.Uuid
+  externalId  String?  @map("external_id")
+  metaEventId String?  @map("meta_event_id")
+  utmSource   String?  @map("utm_source")
+  utmMedium   String?  @map("utm_medium")
+  utmCampaign String?  @map("utm_campaign")
+  utmContent  String?  @map("utm_content")
+  utmTerm     String?  @map("utm_term")
+  gclid       String?
+  gbraid      String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  deal        Deal     @relation(fields: [dealId], references: [id], onDelete: Cascade, map: "lead_attributions_deal_id_fkey")
+
+  @@index([utmSource], map: "lead_attributions_utm_source_idx")
+  @@map("lead_attributions")
+}
+
+/// Proof that one external submission was stored. The unique pair is what makes
+/// a redelivered webhook return the original deal instead of creating a second.
+model IngestionReceipt {
+  id         String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  source     String
+  externalId String   @map("external_id")
+  dealId     String   @map("deal_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+  deal       Deal     @relation(fields: [dealId], references: [id], onDelete: Cascade, map: "ingestion_receipts_deal_id_fkey")
+
+  @@unique([source, externalId], map: "ingestion_receipts_source_external_id_key")
+  @@index([dealId], map: "ingestion_receipts_deal_id_idx")
+  @@map("ingestion_receipts")
+}
+
+/// Durable inbox entry. It survives a failed push, because the in-app centre is
+/// the source of truth when the browser refuses permission (PRD 7.7).
+///
+/// eventKey is unique *per recipient* rather than globally: the cron dispatcher
+/// derives a deterministic key from a task or deal plus the instant its condition
+/// began, and a global unique would silently deliver to only one user once the
+/// manager role of PRD 3 ships.
+model Notification {
+  id              String                    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  recipientUserId String                    @map("recipient_user_id") @db.Uuid
+  dealId          String?                   @map("deal_id") @db.Uuid
+  kind            NotificationKind
+  title           String
+  body            String
+  href            String
+  eventKey        String                    @map("event_key")
+  deliveryState   NotificationDeliveryState @default(PENDING) @map("delivery_state")
+  readAt          DateTime?                 @map("read_at")
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  updatedAt       DateTime                  @updatedAt @map("updated_at")
+
+  recipient User  @relation(fields: [recipientUserId], references: [id], onDelete: Cascade, map: "notifications_recipient_user_id_fkey")
+  deal      Deal? @relation(fields: [dealId], references: [id], onDelete: Cascade, map: "notifications_deal_id_fkey")
+
+  @@unique([recipientUserId, eventKey], map: "notifications_recipient_user_id_event_key_key")
+  @@index([eventKey], map: "notifications_event_key_idx")
+  @@index([recipientUserId, readAt, createdAt], map: "notifications_recipient_user_id_read_at_created_at_idx")
+  @@index([deliveryState, createdAt], map: "notifications_delivery_state_created_at_idx")
+  @@map("notifications")
+}
+
+/// A browser push endpoint owned by one user. Removed only when the push provider
+/// answers 404 or 410; the matching inbox notifications are retained.
+model PushSubscription {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  endpoint  String   @unique(map: "push_subscriptions_endpoint_key")
+  p256dh    String
+  auth      String
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade, map: "push_subscriptions_user_id_fkey")
+
+  @@index([userId], map: "push_subscriptions_user_id_idx")
+  @@map("push_subscriptions")
+}
+
+enum DealStage {
+  NEW
+  QUALIFIED
+  PROPOSAL_SENT
+  PREPAYMENT
+  WON
+  LOST
+
+  @@map("deal_stage")
+}
+
+enum LeadClass {
+  A
+  B
+  C
+
+  @@map("lead_class")
+}
+
+enum TaskKind {
+  CALL
+  MESSAGE
+  CLARIFY
+  OTHER
+
+  @@map("task_kind")
+}
+
+enum TaskStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@map("task_status")
+}
+
+enum LossReason {
+  WRONG_NUMBER
+  NO_ANSWER
+  INAPPROPRIATE
+  IGNORED_AFTER_CALL
+  IGNORED_AFTER_SCORING
+  CURIOSITY
+  CHOSEN_COMPETITOR
+  NEED_DISAPPEARED
+
+  @@map("loss_reason")
+}
+
+enum Material {
+  WPC
+  WOOD
+  FACADE
+
+  @@map("material")
+}
+
+enum PreferredChannel {
+  CALL
+  TELEGRAM
+  WHATSAPP
+  VIBER
+
+  @@map("preferred_channel")
+}
+
+enum DealActivityKind {
+  DEAL_CREATED
+  INBOUND_LEAD_RECEIVED
+  FIELD_UPDATED
+  STAGE_CHANGED
+  REOPENED
+  NOTE_ADDED
+  TASK_CREATED
+  TASK_COMPLETED
+  TASK_CANCELLED
+  TASK_RESCHEDULED
+
+  @@map("deal_activity_kind")
+}
+
+enum NotificationKind {
+  NEW_LEAD
+  TASK_DUE
+  TASK_OVERDUE
+  LEAD_NEEDS_ACTION
+
+  @@map("notification_kind")
+}
+
+enum NotificationDeliveryState {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+
+  @@map("notification_delivery_state")
 }
