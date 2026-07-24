@@ -4,14 +4,22 @@ import {
   clientLookupQuerySchema,
   clientLookupResponseSchema,
   clientParamsSchema,
+  criticalTasksResponseSchema,
   dealActivityResponseSchema,
+  dealBoardQuerySchema,
+  dealBoardResponseSchema,
   dealCreateSchema,
   dealDetailResponseSchema,
   dealListQuerySchema,
   dealListResponseSchema,
   dealNoteCreateSchema,
   dealParamsSchema,
+  dealStageChangeSchema,
+  dealTaskResponseSchema,
   dealUpdateSchema,
+  taskCreateSchema,
+  taskParamsSchema,
+  taskUpdateSchema,
 } from '@teraso-crm/contracts'
 import { createRoute, OpenAPIHono } from '@hono/zod-openapi'
 import type { MiddlewareHandler } from 'hono'
@@ -19,6 +27,7 @@ import type { MiddlewareHandler } from 'hono'
 import { validationErrorHook } from '../../../http/errors'
 import type { AuthHttpEnv } from '../../auth'
 import type { CrmService } from '../application/crm-service'
+import type { TaskService } from '../application/task-service'
 import { executeCrm } from './errors'
 
 const errorContent = { 'application/json': { schema: apiErrorSchema } }
@@ -54,6 +63,22 @@ const createDealRoute = createRoute({
   },
 })
 
+/**
+ * Declared and registered before `/deals/{dealId}` so the literal `board`
+ * segment resolves here rather than failing the uuid check on the detail route.
+ */
+const getBoardRoute = createRoute({
+  method: 'get',
+  path: '/deals/board',
+  security: bearerSecurity,
+  request: { query: dealBoardQuerySchema },
+  responses: {
+    200: { ...jsonBody(dealBoardResponseSchema), description: 'Deals grouped by active stage' },
+    400: { content: errorContent, description: 'Invalid query' },
+    401: { content: errorContent, description: 'Authentication required' },
+  },
+})
+
 const getDealRoute = createRoute({
   method: 'get',
   path: '/deals/{dealId}',
@@ -64,6 +89,36 @@ const getDealRoute = createRoute({
     400: { content: errorContent, description: 'Invalid deal id' },
     401: { content: errorContent, description: 'Authentication required' },
     404: { content: errorContent, description: 'Deal not found' },
+  },
+})
+
+const changeStageRoute = createRoute({
+  method: 'post',
+  path: '/deals/{dealId}/stage',
+  security: bearerSecurity,
+  request: { params: dealParamsSchema, body: jsonBody(dealStageChangeSchema) },
+  responses: {
+    200: { ...jsonBody(dealDetailResponseSchema), description: 'Deal after the stage move' },
+    400: { content: errorContent, description: 'Invalid payload or forbidden transition' },
+    401: { content: errorContent, description: 'Authentication required' },
+    404: { content: errorContent, description: 'Deal not found' },
+    413: { content: errorContent, description: 'Request body is too large' },
+    429: { content: errorContent, description: 'Too many requests' },
+  },
+})
+
+const createTaskRoute = createRoute({
+  method: 'post',
+  path: '/deals/{dealId}/tasks',
+  security: bearerSecurity,
+  request: { params: dealParamsSchema, body: jsonBody(taskCreateSchema) },
+  responses: {
+    201: { ...jsonBody(dealTaskResponseSchema), description: 'Created task' },
+    400: { content: errorContent, description: 'Invalid payload' },
+    401: { content: errorContent, description: 'Authentication required' },
+    404: { content: errorContent, description: 'Deal not found' },
+    413: { content: errorContent, description: 'Request body is too large' },
+    429: { content: errorContent, description: 'Too many requests' },
   },
 })
 
@@ -94,6 +149,32 @@ const addNoteRoute = createRoute({
     404: { content: errorContent, description: 'Deal not found' },
     413: { content: errorContent, description: 'Request body is too large' },
     429: { content: errorContent, description: 'Too many requests' },
+  },
+})
+
+const updateTaskRoute = createRoute({
+  method: 'patch',
+  path: '/tasks/{taskId}',
+  security: bearerSecurity,
+  request: { params: taskParamsSchema, body: jsonBody(taskUpdateSchema) },
+  responses: {
+    200: { ...jsonBody(dealTaskResponseSchema), description: 'Updated task' },
+    400: { content: errorContent, description: 'Invalid payload' },
+    401: { content: errorContent, description: 'Authentication required' },
+    404: { content: errorContent, description: 'Task not found' },
+    413: { content: errorContent, description: 'Request body is too large' },
+    429: { content: errorContent, description: 'Too many requests' },
+  },
+})
+
+/** Registered before `/tasks/{taskId}` so `critical` is not read as a task id. */
+const criticalTasksRoute = createRoute({
+  method: 'get',
+  path: '/tasks/critical',
+  security: bearerSecurity,
+  responses: {
+    200: { ...jsonBody(criticalTasksResponseSchema), description: 'Overdue tasks on open deals' },
+    401: { content: errorContent, description: 'Authentication required' },
   },
 })
 
@@ -128,9 +209,10 @@ const getClientRoute = createRoute({
 type CreateCrmRoutesOptions = {
   requireAuth: MiddlewareHandler<AuthHttpEnv>
   service: CrmService
+  taskService: TaskService
 }
 
-export function createCrmRoutes({ requireAuth, service }: CreateCrmRoutesOptions) {
+export function createCrmRoutes({ requireAuth, service, taskService }: CreateCrmRoutesOptions) {
   const routes = new OpenAPIHono<AuthHttpEnv>({ defaultHook: validationErrorHook })
 
   /**
@@ -140,9 +222,15 @@ export function createCrmRoutes({ requireAuth, service }: CreateCrmRoutesOptions
    * would shadow Task 5's unauthenticated `/api/crm/inbound/quiz` webhook and
    * answer 401 for it depending on mount order. Scoped guards leave the router
    * with no route for `/inbound/*`, so a sibling webhook router mounts cleanly.
+   *
+   * `/tasks` and `/tasks/*` are guarded explicitly: they match neither `/deals`
+   * nor `/clients`, so without their own guard `PATCH /tasks/:id` and
+   * `GET /tasks/critical` would ship unauthenticated over a CRM full of PII.
    */
   routes.use('/deals', requireAuth)
   routes.use('/deals/*', requireAuth)
+  routes.use('/tasks', requireAuth)
+  routes.use('/tasks/*', requireAuth)
   routes.use('/clients/*', requireAuth)
 
   routes.openapi(listDealsRoute, async (c) => {
@@ -152,6 +240,11 @@ export function createCrmRoutes({ requireAuth, service }: CreateCrmRoutesOptions
   routes.openapi(createDealRoute, async (c) => {
     const deal = await executeCrm(() => service.createDeal(c.req.valid('json'), c.var.user))
     return c.json({ deal }, 201)
+  })
+
+  // Before getDealRoute: the literal `/deals/board` must win over `/deals/{dealId}`.
+  routes.openapi(getBoardRoute, async (c) => {
+    return c.json(await executeCrm(() => service.getBoard(c.req.valid('query'), c.var.user)), 200)
   })
 
   routes.openapi(getDealRoute, async (c) => {
@@ -168,11 +261,37 @@ export function createCrmRoutes({ requireAuth, service }: CreateCrmRoutesOptions
     return c.json({ deal }, 200)
   })
 
+  routes.openapi(changeStageRoute, async (c) => {
+    const deal = await executeCrm(() =>
+      service.changeStage(c.req.valid('param').dealId, c.req.valid('json'), c.var.user),
+    )
+    return c.json({ deal }, 200)
+  })
+
+  routes.openapi(createTaskRoute, async (c) => {
+    const task = await executeCrm(() =>
+      taskService.createTask(c.req.valid('param').dealId, c.req.valid('json'), c.var.user),
+    )
+    return c.json({ task }, 201)
+  })
+
   routes.openapi(addNoteRoute, async (c) => {
     const activity = await executeCrm(() =>
       service.addNote(c.req.valid('param').dealId, c.req.valid('json'), c.var.user),
     )
     return c.json({ activity }, 201)
+  })
+
+  // Before updateTaskRoute: the literal `/tasks/critical` must win over `/tasks/{taskId}`.
+  routes.openapi(criticalTasksRoute, async (c) => {
+    return c.json(await executeCrm(() => taskService.listCriticalTasks(c.var.user)), 200)
+  })
+
+  routes.openapi(updateTaskRoute, async (c) => {
+    const task = await executeCrm(() =>
+      taskService.updateTask(c.req.valid('param').taskId, c.req.valid('json'), c.var.user),
+    )
+    return c.json({ task }, 200)
   })
 
   /**

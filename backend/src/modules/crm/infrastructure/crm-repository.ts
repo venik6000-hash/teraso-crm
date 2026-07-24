@@ -1,13 +1,17 @@
 import {
+  ACTIVE_DEAL_STAGES,
   CLIENT_DETAIL_DEAL_LIMIT,
   DEALS_MAX_PAGE,
   OPEN_DEAL_STAGES,
   type ActivityFieldChange,
   type ClientDetailDto,
   type ClientLookupResponse,
+  type CriticalTasksResponse,
   type DealActivityMetadata,
+  type DealBoardResponse,
   type DealDetailDto,
   type DealSummaryDto,
+  type DealTaskDto,
 } from '@teraso-crm/contracts'
 
 import type { DbClient } from '../../../db'
@@ -15,8 +19,12 @@ import { Prisma } from '../../../generated/prisma/client'
 import type {
   CrmRepository,
   DealCreateCommand,
+  DealStageChangeCommand,
   DealUpdateCommand,
+  TaskCreateCommand,
+  TaskUpdateCommand,
 } from '../application/ports'
+import { validateStageChange } from '../domain/deal-rules'
 import { CrmFailure } from '../domain/errors'
 import {
   activitySelect,
@@ -28,10 +36,17 @@ import {
   toClientSummary,
   toDealDetail,
   toDealSummary,
+  toTaskDto,
   type DealSummaryRow,
   type TaskRow,
 } from './deal-mappers'
-import { listConditions, sortColumns, sortDirections } from './deal-list-query'
+import {
+  activeStagesSql,
+  listConditions,
+  nearestActiveTaskLateral,
+  sortColumns,
+  sortDirections,
+} from './deal-list-query'
 import { toMoneyString } from './serialization'
 
 /* ------------------------------------------------------------------ *
@@ -86,13 +101,7 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
           SELECT d.id, COUNT(*) OVER () AS total
           FROM deals d
           JOIN clients c ON c.id = d.client_id
-          LEFT JOIN LATERAL (
-            SELECT t.due_at
-            FROM deal_tasks t
-            WHERE t.deal_id = d.id AND t.status = 'ACTIVE'::task_status
-            ORDER BY t.due_at ASC, t.id ASC
-            LIMIT 1
-          ) nearest_task ON TRUE
+          ${nearestActiveTaskLateral}
           ${where}
           ORDER BY ${sortColumns[query.sort]} ${sortDirections[query.direction]}, d.id DESC
           LIMIT ${query.pageSize} OFFSET ${(query.page - 1) * query.pageSize}
@@ -119,6 +128,44 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
       }
     },
 
+    /**
+     * The board is the list's data, grouped. It builds on the same
+     * `listConditions` predicates and the same nearest-active-task lateral as
+     * `listDeals`, adding only the active-stage restriction (LOST never gets a
+     * column) so urgency is computed once and cannot drift between the two views.
+     */
+    async listBoard(query, now) {
+      const conditions = [Prisma.sql`d.stage IN ${activeStagesSql}`, ...listConditions(query, now)]
+      const rows = await db.$queryRaw<Array<{ id: string }>>(
+        Prisma.sql`
+          SELECT d.id
+          FROM deals d
+          JOIN clients c ON c.id = d.client_id
+          ${nearestActiveTaskLateral}
+          WHERE ${Prisma.join(conditions, ' AND ')}
+          ORDER BY d.submitted_at DESC, d.id DESC
+        `,
+      )
+
+      const orderedIds = rows.map((row) => row.id)
+      const deals = await db.deal.findMany({
+        where: { id: { in: orderedIds } },
+        select: dealSummarySelect,
+      })
+      const byId = new Map(deals.map((deal) => [deal.id, deal]))
+      const ordered = orderedIds
+        .map((id) => byId.get(id))
+        .filter((deal): deal is DealSummaryRow => deal !== undefined)
+      const summaries = await summariesFor(ordered, now)
+
+      return {
+        columns: ACTIVE_DEAL_STAGES.map((stage) => {
+          const dealsForStage = summaries.filter((summary) => summary.stage === stage)
+          return { stage, totalCount: dealsForStage.length, deals: dealsForStage }
+        }),
+      } satisfies DealBoardResponse
+    },
+
     findDeal(dealId, now) {
       return detailFor(dealId, now)
     },
@@ -133,6 +180,12 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
     async updateDeal(command) {
       const applied = await applyDealUpdate(db, command)
       if (!applied) return null
+      return detailFor(command.dealId, command.now)
+    },
+
+    async changeStage(command) {
+      const changed = await applyStageChange(db, command)
+      if (!changed) return null
       return detailFor(command.dealId, command.now)
     },
 
@@ -152,6 +205,42 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
         select: activitySelect,
       })
       return toActivityDto(activity)
+    },
+
+    async createTask(command) {
+      const task = await insertTask(db, command)
+      return task ? toTaskDto(task) : null
+    },
+
+    async updateTask(command) {
+      const task = await applyTaskUpdate(db, command)
+      return task ? toTaskDto(task) : null
+    },
+
+    /**
+     * The tasks that hold a deal in the critical list: every ACTIVE task due at
+     * or before `now` on an OPEN deal, soonest first. A deal that is critical
+     * only for having no next step has no task to surface here and belongs to the
+     * critical-deals list instead.
+     */
+    async listCriticalTasks(now) {
+      const rows = await db.dealTask.findMany({
+        where: {
+          status: 'ACTIVE',
+          dueAt: { lte: now },
+          deal: { stage: { in: [...OPEN_DEAL_STAGES] } },
+        },
+        orderBy: [{ dueAt: 'asc' }, { id: 'asc' }],
+        select: { ...taskSelect, deal: { select: dealSummarySelect } },
+      })
+
+      const nearest = await nearestActiveTasks([...new Set(rows.map((row) => row.deal.id))])
+      return {
+        items: rows.map((row) => ({
+          task: toTaskDto(row),
+          deal: toDealSummary(row.deal, nearest.get(row.deal.id) ?? null, now),
+        })),
+      } satisfies CriticalTasksResponse
     },
 
     async findClient(clientId, now) {
@@ -453,6 +542,224 @@ async function applyDealUpdate(db: DbClient, command: DealUpdateCommand): Promis
   } catch (error) {
     throw translateWriteError(error)
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Stage transitions
+ * ------------------------------------------------------------------ */
+
+/**
+ * Loads the deal, validates the move against the server-authoritative funnel
+ * graph and writes the new stage, its payment fields and one history row — all
+ * in a single transaction so the current stage the rule reads cannot change
+ * under it. Returns false when the deal does not exist (a 404 upstream).
+ *
+ * The activity is REOPENED for a `WON|LOST -> NEW` correction and STAGE_CHANGED
+ * for every real funnel move; a reopen never writes both, because the dashboard
+ * counts STAGE_CHANGED rows as conversions (PRD 7.8 item 5, contract note).
+ */
+async function applyStageChange(db: DbClient, command: DealStageChangeCommand): Promise<boolean> {
+  const { dealId, input, actorUserId, now } = command
+
+  try {
+    return await db.$transaction(async (tx) => {
+      const existing = await tx.deal.findUnique({
+        where: { id: dealId },
+        select: { id: true, stage: true },
+      })
+      if (!existing) return false
+
+      const transition = validateStageChange({
+        from: existing.stage,
+        to: input.stage,
+        prepaymentAmount: input.prepaymentAmount,
+        prepaymentPaidAt: input.prepaymentPaidAt,
+        fullPaymentAmount: input.fullPaymentAmount,
+        fullPaymentPaidAt: input.fullPaymentPaidAt,
+        lossReason: input.lossReason ?? null,
+      })
+
+      const data: Prisma.DealUncheckedUpdateInput = { stage: input.stage }
+
+      // Only a LOST deal carries a reason, so every move off LOST clears it —
+      // server-side, never trusting the client to send `lossReason: null`.
+      data.lossReason = input.stage === 'LOST' ? input.lossReason! : null
+
+      if (transition.kind === 'reopen') {
+        // A reopened deal is open from scratch: a payment date left on a NEW deal
+        // would be counted as revenue by the dashboard period scan, the same
+        // stale-state bug the cleared lossReason guards against.
+        data.prepaymentAmount = null
+        data.prepaymentPaidAt = null
+        data.fullPaymentAmount = null
+        data.fullPaymentPaidAt = null
+      }
+      if (input.stage === 'PREPAYMENT') {
+        data.prepaymentAmount = new Prisma.Decimal(input.prepaymentAmount!)
+        data.prepaymentPaidAt = new Date(input.prepaymentPaidAt!)
+      }
+      if (input.stage === 'WON') {
+        data.fullPaymentAmount = new Prisma.Decimal(input.fullPaymentAmount!)
+        data.fullPaymentPaidAt = new Date(input.fullPaymentPaidAt!)
+      }
+
+      await tx.deal.update({ where: { id: dealId }, data })
+
+      // The optional loss comment is ordinary NOTE_ADDED history, inserted before
+      // the transition row so the stage event sorts newest on the shared `now`
+      // via the monotonic uuidv7 id tiebreaker — no per-event time offset.
+      if (input.comment) {
+        await tx.dealActivity.create({
+          data: {
+            dealId,
+            kind: 'NOTE_ADDED',
+            text: input.comment,
+            authorUserId: actorUserId,
+            createdAt: now,
+            metadata: Prisma.DbNull,
+          },
+        })
+      }
+
+      await tx.dealActivity.create({
+        data: {
+          dealId,
+          kind: transition.kind === 'reopen' ? 'REOPENED' : 'STAGE_CHANGED',
+          authorUserId: actorUserId,
+          createdAt: now,
+          fromStage: existing.stage,
+          toStage: input.stage,
+          metadata:
+            transition.kind === 'lose'
+              ? ({ lossReason: input.lossReason! } satisfies DealActivityMetadata)
+              : Prisma.DbNull,
+        },
+      })
+
+      return true
+    })
+  } catch (error) {
+    throw translateWriteError(error)
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Tasks
+ * ------------------------------------------------------------------ */
+
+async function insertTask(db: DbClient, command: TaskCreateCommand): Promise<TaskRow | null> {
+  const { dealId, input, actorUserId, now } = command
+
+  try {
+    return await db.$transaction(async (tx) => {
+      const deal = await tx.deal.findUnique({
+        where: { id: dealId },
+        select: { id: true, responsibleUserId: true },
+      })
+      if (!deal) return null
+
+      const task = await tx.dealTask.create({
+        data: {
+          dealId,
+          kind: input.kind,
+          title: input.title,
+          dueAt: new Date(input.dueAt),
+          // Absent assignee means the deal's responsible user, or nobody — never
+          // the caller's identity, matching the initial-task rule on create.
+          assigneeUserId: input.assigneeUserId ?? deal.responsibleUserId,
+        },
+        select: taskSelect,
+      })
+
+      await tx.dealActivity.create({
+        data: {
+          dealId,
+          kind: 'TASK_CREATED',
+          authorUserId: actorUserId,
+          createdAt: now,
+          metadata: {
+            taskId: task.id,
+            taskKind: task.kind,
+            dueAt: task.dueAt.toISOString(),
+          } satisfies DealActivityMetadata,
+        },
+      })
+
+      return task
+    })
+  } catch (error) {
+    throw translateWriteError(error)
+  }
+}
+
+/**
+ * Applies a task edit and records the matching typed activity. A completed or
+ * cancelled task is terminal: reschedule, re-cancel and reopen are refused, so
+ * the log tells one clean story per task. Returns null when the task is missing.
+ */
+async function applyTaskUpdate(db: DbClient, command: TaskUpdateCommand): Promise<TaskRow | null> {
+  const { taskId, input, actorUserId, now } = command
+
+  try {
+    return await db.$transaction(async (tx) => {
+      const existing = await tx.dealTask.findUnique({
+        where: { id: taskId },
+        select: { id: true, dealId: true, status: true, dueAt: true },
+      })
+      if (!existing) return null
+
+      if (existing.status !== 'ACTIVE') {
+        throw new CrmFailure('validation', 'Нельзя изменить завершённую или отменённую задачу')
+      }
+
+      const dueChanged =
+        input.dueAt !== undefined && new Date(input.dueAt).getTime() !== existing.dueAt.getTime()
+
+      const data: Prisma.DealTaskUncheckedUpdateInput = {}
+      if (input.kind !== undefined) data.kind = input.kind
+      if (input.title !== undefined) data.title = input.title
+      if (input.dueAt !== undefined) data.dueAt = new Date(input.dueAt)
+      if (input.assigneeUserId !== undefined) data.assigneeUserId = input.assigneeUserId
+      if (input.status !== undefined) {
+        data.status = input.status
+        data.completedAt = input.status === 'COMPLETED' ? now : null
+      }
+
+      const task = await tx.dealTask.update({ where: { id: taskId }, data, select: taskSelect })
+
+      // One headline event per intent: a completion or cancellation wins over a
+      // same-request due-date change; a bare due change on a still-active task is
+      // a reschedule; a title/kind/assignee-only edit records nothing.
+      if (input.status === 'COMPLETED') {
+        await writeTaskActivity(tx, existing.dealId, 'TASK_COMPLETED', actorUserId, now, { taskId })
+      } else if (input.status === 'CANCELLED') {
+        await writeTaskActivity(tx, existing.dealId, 'TASK_CANCELLED', actorUserId, now, { taskId })
+      } else if (dueChanged) {
+        await writeTaskActivity(tx, existing.dealId, 'TASK_RESCHEDULED', actorUserId, now, {
+          taskId,
+          dueAt: new Date(input.dueAt!).toISOString(),
+          previousDueAt: existing.dueAt.toISOString(),
+        })
+      }
+
+      return task
+    })
+  } catch (error) {
+    throw translateWriteError(error)
+  }
+}
+
+function writeTaskActivity(
+  tx: TransactionClient,
+  dealId: string,
+  kind: 'TASK_COMPLETED' | 'TASK_CANCELLED' | 'TASK_RESCHEDULED',
+  authorUserId: string,
+  now: Date,
+  metadata: DealActivityMetadata,
+) {
+  return tx.dealActivity.create({
+    data: { dealId, kind, authorUserId, createdAt: now, metadata },
+  })
 }
 
 /* ------------------------------------------------------------------ *

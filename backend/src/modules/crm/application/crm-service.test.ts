@@ -3,14 +3,22 @@ import type {
   ClientDetailDto,
   ClientLookupResponse,
   DealActivityDto,
+  DealBoardResponse,
   DealDetailDto,
   DealListPage,
+  DealTaskDto,
 } from '@teraso-crm/contracts'
 
 import type { AuthenticatedPrincipal } from '../../auth'
 import { CrmFailure } from '../domain/errors'
 import { CrmService } from './crm-service'
-import type { CrmRepository, DealCreateCommand, DealUpdateCommand, NoteCommand } from './ports'
+import type {
+  CrmRepository,
+  DealCreateCommand,
+  DealStageChangeCommand,
+  DealUpdateCommand,
+  NoteCommand,
+} from './ports'
 
 const actor: AuthenticatedPrincipal = {
   id: '00000000-0000-7000-8000-000000000001',
@@ -26,23 +34,31 @@ const now = new Date('2026-07-23T10:00:00.000Z')
 type RecordedCalls = {
   createDeal: DealCreateCommand[]
   updateDeal: DealUpdateCommand[]
+  changeStage: DealStageChangeCommand[]
   addNote: NoteCommand[]
   lookupClientByPhone: Array<{ phoneNormalized: string; now: Date }>
   listDeals: Array<{ now: Date }>
+  listBoard: Array<{ now: Date }>
 }
 
 function createRepository(overrides: Partial<CrmRepository> = {}) {
   const calls: RecordedCalls = {
     createDeal: [],
     updateDeal: [],
+    changeStage: [],
     addNote: [],
     lookupClientByPhone: [],
     listDeals: [],
+    listBoard: [],
   }
   const repository: CrmRepository = {
     listDeals: async (_query, at) => {
       calls.listDeals.push({ now: at })
       return { items: [], page: 1, pageSize: 20, total: 0, hasNext: false } as DealListPage
+    },
+    listBoard: async (_query, at) => {
+      calls.listBoard.push({ now: at })
+      return { columns: [] } as DealBoardResponse
     },
     findDeal: async () => null,
     createDeal: async (command) => {
@@ -53,10 +69,17 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
       calls.updateDeal.push(command)
       return { id: 'deal' } as unknown as DealDetailDto
     },
+    changeStage: async (command) => {
+      calls.changeStage.push(command)
+      return { id: 'deal' } as unknown as DealDetailDto
+    },
     addNote: async (command) => {
       calls.addNote.push(command)
       return { id: 'activity' } as unknown as DealActivityDto
     },
+    createTask: async () => ({ id: 'task' }) as unknown as DealTaskDto,
+    updateTask: async () => ({ id: 'task' }) as unknown as DealTaskDto,
+    listCriticalTasks: async () => ({ items: [] }),
     findClient: async () => null,
     lookupClientByPhone: async (phoneNormalized, at) => {
       calls.lookupClientByPhone.push({ phoneNormalized, now: at })
@@ -113,10 +136,12 @@ describe('actor and clock', () => {
 
     await service.createDeal({ name: 'A', phone: '+380935335353', source: 's' }, actor)
     await service.updateDeal('deal-1', { currentNote: 'Перезвонить' }, actor)
+    await service.changeStage('deal-1', { stage: 'QUALIFIED' }, actor)
     await service.addNote('deal-1', { text: 'Звонил, занят' }, actor)
 
     expect(calls.createDeal[0]?.actorUserId).toBe(actor.id)
     expect(calls.updateDeal[0]?.actorUserId).toBe(actor.id)
+    expect(calls.changeStage[0]?.actorUserId).toBe(actor.id)
     expect(calls.addNote[0]?.actorUserId).toBe(actor.id)
   })
 
@@ -127,8 +152,13 @@ describe('actor and clock', () => {
       { page: 1, pageSize: 20, sort: 'submittedAt', direction: 'desc', noNextStep: false, overdue: false, dueToday: false, isCritical: false },
       actor,
     )
+    await service.getBoard(
+      { noNextStep: false, overdue: false, dueToday: false, isCritical: false },
+      actor,
+    )
 
     expect(calls.listDeals[0]?.now).toBe(now)
+    expect(calls.listBoard[0]?.now).toBe(now)
   })
 })
 
@@ -139,6 +169,7 @@ describe('missing records', () => {
     service = createService({
       findDeal: async () => null,
       updateDeal: async () => null,
+      changeStage: async () => null,
       addNote: async () => null,
       findClient: async () => null,
     }).service
@@ -148,6 +179,7 @@ describe('missing records', () => {
     for (const operation of [
       () => service.getDeal('11111111-1111-7111-8111-111111111111', actor),
       () => service.updateDeal('11111111-1111-7111-8111-111111111111', { currentNote: 'x' }, actor),
+      () => service.changeStage('11111111-1111-7111-8111-111111111111', { stage: 'QUALIFIED' }, actor),
       () => service.addNote('11111111-1111-7111-8111-111111111111', { text: 'x' }, actor),
     ]) {
       const error = await operation().catch((caught: unknown) => caught)

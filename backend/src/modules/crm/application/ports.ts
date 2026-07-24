@@ -1,12 +1,19 @@
 import type {
   ClientDetailDto,
   ClientLookupResponse,
+  CriticalTasksResponse,
   DealActivityDto,
+  DealBoardQuery,
+  DealBoardResponse,
   DealCreateInput,
   DealDetailDto,
   DealListPage,
   DealListQuery,
+  DealStageChangeInput,
+  DealTaskDto,
   DealUpdateInput,
+  TaskCreateInput,
+  TaskUpdateInput,
 } from '@teraso-crm/contracts'
 
 /**
@@ -21,10 +28,15 @@ import type {
  */
 export type CrmRepository = {
   listDeals(query: DealListQuery, now: Date): Promise<DealListPage>
+  listBoard(query: DealBoardQuery, now: Date): Promise<DealBoardResponse>
   findDeal(dealId: string, now: Date): Promise<DealDetailDto | null>
   createDeal(command: DealCreateCommand): Promise<DealDetailDto>
   updateDeal(command: DealUpdateCommand): Promise<DealDetailDto | null>
+  changeStage(command: DealStageChangeCommand): Promise<DealDetailDto | null>
   addNote(command: NoteCommand): Promise<DealActivityDto | null>
+  createTask(command: TaskCreateCommand): Promise<DealTaskDto | null>
+  updateTask(command: TaskUpdateCommand): Promise<DealTaskDto | null>
+  listCriticalTasks(now: Date): Promise<CriticalTasksResponse>
   findClient(clientId: string, now: Date): Promise<ClientDetailDto | null>
   lookupClientByPhone(phoneNormalized: string, now: Date): Promise<ClientLookupResponse>
 }
@@ -48,9 +60,35 @@ export type DealUpdateCommand = {
   now: Date
 }
 
+/**
+ * The stage move plus the fields its destination may carry. The reachable-stage
+ * graph is enforced in the repository transaction (via `validateStageChange`)
+ * rather than here, so the load, the rule and the write stay atomic.
+ */
+export type DealStageChangeCommand = {
+  dealId: string
+  input: DealStageChangeInput
+  actorUserId: string
+  now: Date
+}
+
 export type NoteCommand = {
   dealId: string
   text: string
+  actorUserId: string
+  now: Date
+}
+
+export type TaskCreateCommand = {
+  dealId: string
+  input: TaskCreateInput
+  actorUserId: string
+  now: Date
+}
+
+export type TaskUpdateCommand = {
+  taskId: string
+  input: TaskUpdateInput
   actorUserId: string
   now: Date
 }

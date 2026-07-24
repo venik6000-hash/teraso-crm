@@ -3,10 +3,13 @@ import type {
   ClientLookupQuery,
   ClientLookupResponse,
   DealActivityDto,
+  DealBoardQuery,
+  DealBoardResponse,
   DealCreateInput,
   DealDetailDto,
   DealListPage,
   DealListQuery,
+  DealStageChangeInput,
   DealUpdateInput,
   NoteCreateInput,
 } from '@teraso-crm/contracts'
@@ -39,6 +42,11 @@ export class CrmService {
     return this.dependencies.repository.listDeals(input, this.now())
   }
 
+  /** The board is the list's deals grouped by active stage; it shares the clock. */
+  getBoard(input: DealBoardQuery, _actor: AuthenticatedPrincipal): Promise<DealBoardResponse> {
+    return this.dependencies.repository.listBoard(input, this.now())
+  }
+
   async getDeal(dealId: string, _actor: AuthenticatedPrincipal): Promise<DealDetailDto> {
     const deal = await this.dependencies.repository.findDeal(dealId, this.now())
     if (!deal) throw dealNotFound()
@@ -65,6 +73,27 @@ export class CrmService {
     actor: AuthenticatedPrincipal,
   ): Promise<DealDetailDto> {
     const deal = await this.dependencies.repository.updateDeal({
+      dealId,
+      input,
+      actorUserId: actor.id,
+      now: this.now(),
+    })
+    if (!deal) throw dealNotFound()
+    return deal
+  }
+
+  /**
+   * Moves a deal through the funnel. The reachable-stage graph and the
+   * payment/loss-reason rules are enforced in the repository transaction (so the
+   * read and the write stay atomic); this method only resolves the actor and the
+   * clock and maps a missing deal to a not-found failure.
+   */
+  async changeStage(
+    dealId: string,
+    input: DealStageChangeInput,
+    actor: AuthenticatedPrincipal,
+  ): Promise<DealDetailDto> {
+    const deal = await this.dependencies.repository.changeStage({
       dealId,
       input,
       actorUserId: actor.id,

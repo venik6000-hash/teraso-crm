@@ -1,13 +1,19 @@
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import {
+  ACTIVE_DEAL_STAGES,
   CLIENT_DETAIL_DEAL_LIMIT,
   clientDetailResponseSchema,
   clientLookupResponseSchema,
+  criticalTasksResponseSchema,
   dealActivityResponseSchema,
+  dealBoardResponseSchema,
   dealDetailResponseSchema,
   dealListResponseSchema,
+  dealTaskResponseSchema,
+  lossReasonSchema,
   type DealCreateInput,
   type DealDetailDto,
+  type DealTaskDto,
 } from '@teraso-crm/contracts'
 
 import { createApp } from '../../app'
@@ -395,6 +401,17 @@ maybeDescribe('CRM clients, deals and history integration', () => {
           `/api/crm/deals/${missing}`,
           { method: 'PATCH', body: JSON.stringify({ currentNote: 'x' }) },
         ],
+        [
+          `/api/crm/deals/${missing}/stage`,
+          { method: 'POST', body: JSON.stringify({ stage: 'QUALIFIED' }) },
+        ],
+        [
+          `/api/crm/deals/${missing}/tasks`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ kind: 'CALL', title: 'x', dueAt: '2026-07-23T12:00:00.000Z' }),
+          },
+        ],
         [`/api/crm/deals/${missing}/notes`, { method: 'POST', body: JSON.stringify({ text: 'x' }) }],
         [`/api/crm/clients/${missing}`, undefined],
       ] as const) {
@@ -740,6 +757,24 @@ maybeDescribe('CRM clients, deals and history integration', () => {
         phone: '+380671110006',
         source: 'teraso.com.ua',
       })
+      // The task-lifecycle and reopen flows this task introduced add three more
+      // states the drift guard must cover: a deal whose only task is COMPLETED, a
+      // deal whose only task is CANCELLED, and a deal reopened from WON to NEW.
+      const completedTaskless = await createDeal({
+        name: 'С выполненной задачей',
+        phone: '+380671110007',
+        source: 'teraso.com.ua',
+      })
+      const cancelledFresh = await createDeal({
+        name: 'С отменённой задачей',
+        phone: '+380671110008',
+        source: 'teraso.com.ua',
+      })
+      const reopened = await createDeal({
+        name: 'Переоткрыта из успеха',
+        phone: '+380671110009',
+        source: 'teraso.com.ua',
+      })
 
       await prisma.dealTask.createMany({
         data: [
@@ -779,24 +814,86 @@ maybeDescribe('CRM clients, deals and history integration', () => {
           },
         ],
       })
+      /**
+       * A COMPLETED and a CANCELLED task, one each. Neither is ACTIVE, so both
+       * the SQL lateral and the Prisma nearest-task read must ignore them and
+       * report the deals as having no next step — the property this proves.
+       */
+      await prisma.dealTask.create({
+        data: {
+          dealId: completedTaskless.id,
+          kind: 'CALL',
+          title: 'Выполненный звонок',
+          dueAt: new Date(now.getTime() - 60 * 60 * 1000),
+          status: 'COMPLETED',
+          completedAt: now,
+        },
+      })
+      await prisma.dealTask.create({
+        data: {
+          dealId: cancelledFresh.id,
+          kind: 'CALL',
+          title: 'Отменённый звонок',
+          dueAt: new Date(now.getTime() + 60 * 60 * 1000),
+          status: 'CANCELLED',
+        },
+      })
+
+      // Reopen the reopened deal through the real path, so the guard confirms a
+      // WON -> NEW correction genuinely returns it to the open funnel.
       await prisma.deal.update({
-        where: { id: staleTaskless.id },
+        where: { id: reopened.id },
+        data: {
+          stage: 'WON',
+          fullPaymentAmount: '100000',
+          fullPaymentPaidAt: now,
+        },
+      })
+      await changeStage(reopened.id, { stage: 'NEW' })
+
+      // Stale (past the grace window) deals turn critical once they have no next
+      // step: the taskless one, the completed-task one and the reopened one.
+      await prisma.deal.updateMany({
+        where: { id: { in: [staleTaskless.id, completedTaskless.id, reopened.id] } },
         data: { createdAt: new Date(now.getTime() - 2 * 60 * 60 * 1000) },
       })
       await prisma.deal.update({ where: { id: won.id }, data: { stage: 'WON' } })
 
-      return { withFutureTask, overdue, staleTaskless, freshTaskless, won, dueToday }
+      return {
+        withFutureTask,
+        overdue,
+        staleTaskless,
+        freshTaskless,
+        won,
+        dueToday,
+        completedTaskless,
+        cancelledFresh,
+        reopened,
+      }
     }
 
     test('selects the right deals for each quick flag', async () => {
       const seeded = await seedFlagFixture()
 
       expect(sorted(await ids('noNextStep=true'))).toEqual(
-        sorted([seeded.overdue.id, seeded.staleTaskless.id, seeded.freshTaskless.id]),
+        sorted([
+          seeded.overdue.id,
+          seeded.staleTaskless.id,
+          seeded.freshTaskless.id,
+          seeded.completedTaskless.id,
+          seeded.cancelledFresh.id,
+          seeded.reopened.id,
+        ]),
       )
+      // A completed or cancelled task is not active, so only the yesterday task is overdue.
       expect(await ids('overdue=true')).toEqual([seeded.overdue.id])
       expect(sorted(await ids('isCritical=true'))).toEqual(
-        sorted([seeded.overdue.id, seeded.staleTaskless.id]),
+        sorted([
+          seeded.overdue.id,
+          seeded.staleTaskless.id,
+          seeded.completedTaskless.id,
+          seeded.reopened.id,
+        ]),
       )
       // The won deal also has a task due today, but the dueToday filter is gated by isOpen.
       expect(await ids('dueToday=true')).toEqual([seeded.dueToday.id])
@@ -880,6 +977,25 @@ maybeDescribe('CRM clients, deals and history integration', () => {
         noNextStep: false,
         hasOverdueTask: false,
         isCritical: false,
+      })
+      // A completed task leaves no next step; stale, so critical.
+      expect(byId.get(seeded.completedTaskless.id)).toMatchObject({
+        noNextStep: true,
+        hasOverdueTask: false,
+        isCritical: true,
+      })
+      // A cancelled task likewise, but fresh, so still inside the grace window.
+      expect(byId.get(seeded.cancelledFresh.id)).toMatchObject({
+        noNextStep: true,
+        hasOverdueTask: false,
+        isCritical: false,
+      })
+      // Reopened to NEW and back in the open funnel; stale, so critical.
+      expect(byId.get(seeded.reopened.id)).toMatchObject({
+        stage: 'NEW',
+        noNextStep: true,
+        hasOverdueTask: false,
+        isCritical: true,
       })
       expect(byId.get(seeded.withFutureTask.id)?.nearestActiveTask?.title).toBe('Позвонить позже')
     })
@@ -980,6 +1096,569 @@ maybeDescribe('CRM clients, deals and history integration', () => {
   })
 
   /* ---------------------------------------------------------------- *
+   * Funnel transitions (PRD 7.3, PRD 6.2)
+   * ---------------------------------------------------------------- */
+
+  describe('funnel transitions', () => {
+    test('walks the active path and records each move with its author and stages', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+
+      await changeStage(deal.id, { stage: 'QUALIFIED' })
+      await changeStage(deal.id, { stage: 'PROPOSAL_SENT' })
+      await changeStage(deal.id, {
+        stage: 'PREPAYMENT',
+        prepaymentAmount: '20000',
+        prepaymentPaidAt: '2026-07-20T09:00:00.000Z',
+      })
+      const won = await changeStage(deal.id, {
+        stage: 'WON',
+        fullPaymentAmount: '100000',
+        fullPaymentPaidAt: '2026-07-22T09:00:00.000Z',
+      })
+
+      expect(won.stage).toBe('WON')
+      // Money and payment dates travel through the canonical serializer.
+      expect(won.prepaymentAmount).toBe('20000.00')
+      expect(won.prepaymentPaidAt).toBe('2026-07-20T09:00:00.000Z')
+      expect(won.fullPaymentAmount).toBe('100000.00')
+      expect(won.fullPaymentPaidAt).toBe('2026-07-22T09:00:00.000Z')
+
+      const stageChanges = [...won.activities]
+        .reverse()
+        .filter((activity) => activity.kind === 'STAGE_CHANGED')
+        .map((activity) => ({ from: activity.fromStage, to: activity.toStage }))
+      expect(stageChanges).toEqual([
+        { from: 'NEW', to: 'QUALIFIED' },
+        { from: 'QUALIFIED', to: 'PROPOSAL_SENT' },
+        { from: 'PROPOSAL_SENT', to: 'PREPAYMENT' },
+        { from: 'PREPAYMENT', to: 'WON' },
+      ])
+      expect(won.activities.every((activity) => activity.authorUserId === ownerId)).toBe(true)
+      // A WON deal is exempt from the next-step rule entirely.
+      expect(won).toMatchObject({ noNextStep: false, hasOverdueTask: false, isCritical: false })
+    })
+
+    test('rejects an illegal skip the contract would otherwise accept', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+
+      // The payload is a valid WON shape; only the funnel graph forbids NEW -> WON.
+      const response = await stageRequest(deal.id, {
+        stage: 'WON',
+        fullPaymentAmount: '100000',
+        fullPaymentPaidAt: '2026-07-22T09:00:00.000Z',
+      })
+      expect(response.status).toBe(400)
+      expect((await response.json()).error.message).toContain('Недопустимый переход')
+
+      const after = await getDeal(deal.id)
+      expect(after.stage).toBe('NEW')
+      expect(activityKinds(after)).toEqual(['DEAL_CREATED'])
+    })
+
+    test('rejects a backward move', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(deal.id, { stage: 'QUALIFIED' })
+      await changeStage(deal.id, { stage: 'PROPOSAL_SENT' })
+
+      const response = await stageRequest(deal.id, { stage: 'QUALIFIED' })
+      expect(response.status).toBe(400)
+      expect((await response.json()).error.message).toContain('Недопустимый переход')
+      expect((await getDeal(deal.id)).stage).toBe('PROPOSAL_SENT')
+    })
+
+    test('requires the payment fields before prepayment and success', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(deal.id, { stage: 'QUALIFIED' })
+      await changeStage(deal.id, { stage: 'PROPOSAL_SENT' })
+
+      await expectValidationMessage(
+        await stageRequest(deal.id, { stage: 'PREPAYMENT' }),
+        'Укажите сумму и дату предоплаты',
+      )
+
+      await changeStage(deal.id, {
+        stage: 'PREPAYMENT',
+        prepaymentAmount: '20000',
+        prepaymentPaidAt: '2026-07-20T09:00:00.000Z',
+      })
+
+      await expectValidationMessage(
+        await stageRequest(deal.id, { stage: 'WON' }),
+        'Укажите сумму и дату полной оплаты',
+      )
+      expect((await getDeal(deal.id)).stage).toBe('PREPAYMENT')
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * Closing without a sale (PRD 7.3, PRD 6.3)
+   * ---------------------------------------------------------------- */
+
+  describe('closing as lost', () => {
+    test('closes with each of the eight loss reasons', async () => {
+      const reasons = lossReasonSchema.options
+      expect(reasons).toHaveLength(8)
+
+      for (const [index, lossReason] of reasons.entries()) {
+        const deal = await createDeal({
+          name: `Потеря ${index}`,
+          phone: `+38067111${String(index).padStart(4, '0')}`,
+          source: 'teraso.com.ua',
+        })
+        const lost = await changeStage(deal.id, { stage: 'LOST', lossReason })
+
+        expect(lost.stage).toBe('LOST')
+        expect(lost.lossReason).toBe(lossReason)
+        // A lost deal is exempt from the next-step rule.
+        expect(lost).toMatchObject({ noNextStep: false, hasOverdueTask: false, isCritical: false })
+
+        const stageChanged = lost.activities.find((activity) => activity.kind === 'STAGE_CHANGED')
+        expect(stageChanged).toMatchObject({ fromStage: 'NEW', toStage: 'LOST' })
+        expect(stageChanged?.metadata).toEqual({ lossReason })
+      }
+    })
+
+    test('requires a reason to close as lost', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+
+      await expectValidationMessage(
+        await stageRequest(deal.id, { stage: 'LOST' }),
+        'Выберите причину потери',
+      )
+      expect((await getDeal(deal.id)).stage).toBe('NEW')
+    })
+
+    test('stores an optional loss comment as a note', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+
+      const lost = await changeStage(deal.id, {
+        stage: 'LOST',
+        lossReason: 'CHOSEN_COMPETITOR',
+        comment: 'Клиент выбрал конкурента с более низкой ценой',
+      })
+
+      const note = lost.activities.find((activity) => activity.kind === 'NOTE_ADDED')
+      expect(note?.text).toBe('Клиент выбрал конкурента с более низкой ценой')
+      // The stage event sorts newest over the comment on the shared timestamp.
+      expect(activityKinds(lost)).toEqual(['STAGE_CHANGED', 'NOTE_ADDED', 'DEAL_CREATED'])
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * Reopening (PRD 7.3 — only with a recorded event)
+   * ---------------------------------------------------------------- */
+
+  describe('reopening', () => {
+    test('reopens a lost deal with a REOPENED event only and clears the reason', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(deal.id, { stage: 'LOST', lossReason: 'NEED_DISAPPEARED' })
+
+      const reopened = await changeStage(deal.id, { stage: 'NEW' })
+
+      expect(reopened.stage).toBe('NEW')
+      expect(reopened.lossReason).toBeNull()
+
+      // Newest activity is the reopen, carrying both stages.
+      expect(reopened.activities[0]).toMatchObject({
+        kind: 'REOPENED',
+        fromStage: 'LOST',
+        toStage: 'NEW',
+      })
+      // A reopen never counts as a funnel conversion: exactly the one STAGE_CHANGED
+      // from the original loss, and none pointing at NEW.
+      const stageChanges = reopened.activities.filter((a) => a.kind === 'STAGE_CHANGED')
+      expect(stageChanges).toHaveLength(1)
+      expect(stageChanges[0]?.toStage).toBe('LOST')
+    })
+
+    test('reopening a won deal clears its recorded payments', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      await advanceToWon(deal.id)
+
+      const reopened = await changeStage(deal.id, { stage: 'NEW' })
+
+      expect(reopened.stage).toBe('NEW')
+      expect(reopened.prepaymentAmount).toBeNull()
+      expect(reopened.prepaymentPaidAt).toBeNull()
+      expect(reopened.fullPaymentAmount).toBeNull()
+      expect(reopened.fullPaymentPaidAt).toBeNull()
+      expect(reopened.activities[0]).toMatchObject({
+        kind: 'REOPENED',
+        fromStage: 'WON',
+        toStage: 'NEW',
+      })
+      // The four advancing STAGE_CHANGED rows remain; the reopen added none.
+      expect(reopened.activities.filter((a) => a.kind === 'STAGE_CHANGED')).toHaveLength(4)
+    })
+
+    test('clears the stored reason whether or not the client sends lossReason: null', async () => {
+      const omitted = await createDeal({
+        name: 'Без ключа',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      const explicit = await createDeal({
+        name: 'С null',
+        phone: '+380671110002',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(omitted.id, { stage: 'LOST', lossReason: 'NO_ANSWER' })
+      await changeStage(explicit.id, { stage: 'LOST', lossReason: 'NO_ANSWER' })
+
+      expect((await changeStage(omitted.id, { stage: 'NEW' })).lossReason).toBeNull()
+      expect((await changeStage(explicit.id, { stage: 'NEW', lossReason: null })).lossReason).toBeNull()
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * Tasks and criticality (PRD 7.4)
+   * ---------------------------------------------------------------- */
+
+  describe('tasks', () => {
+    test('creates a task, defaults its assignee to the responsible user and clears no-next-step', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+        responsibleUserId: ownerId,
+      })
+      expect(deal.noNextStep).toBe(true)
+
+      const task = await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Позвонить и уточнить площадь',
+        dueAt: futureIso(3 * 60 * 60 * 1000),
+      })
+      // Absent assignee means the deal's responsible user, never the caller as such.
+      expect(task.assigneeUserId).toBe(ownerId)
+      expect(task.status).toBe('ACTIVE')
+
+      const after = await getDeal(deal.id)
+      expect(after.nearestActiveTask?.id).toBe(task.id)
+      expect(after).toMatchObject({ noNextStep: false, hasOverdueTask: false, isCritical: false })
+
+      const created = after.activities.find((activity) => activity.kind === 'TASK_CREATED')
+      expect(created?.metadata).toEqual({
+        taskId: task.id,
+        taskKind: 'CALL',
+        dueAt: task.dueAt,
+      })
+    })
+
+    test('completing the last active task leaves the deal without a next step but does not block', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      const task = await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Позвонить',
+        dueAt: futureIso(3 * 60 * 60 * 1000),
+      })
+
+      const completed = await updateTask(task.id, { status: 'COMPLETED' })
+      expect(completed.status).toBe('COMPLETED')
+      expect(completed.completedAt).not.toBeNull()
+
+      const after = await getDeal(deal.id)
+      expect(after.nearestActiveTask).toBeNull()
+      // The next-step requirement returns; the server records it rather than
+      // refusing the completion. The deal is fresh, so still inside the grace.
+      expect(after).toMatchObject({ noNextStep: true, isCritical: false })
+      expect(activityKinds(after)).toContain('TASK_COMPLETED')
+    })
+
+    test('cancelling a task records the event and drops the next step', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      const task = await createTask(deal.id, {
+        kind: 'MESSAGE',
+        title: 'Написать',
+        dueAt: futureIso(3 * 60 * 60 * 1000),
+      })
+
+      const cancelled = await updateTask(task.id, { status: 'CANCELLED' })
+      expect(cancelled.status).toBe('CANCELLED')
+      expect(cancelled.completedAt).toBeNull()
+
+      const after = await getDeal(deal.id)
+      expect(after.nearestActiveTask).toBeNull()
+      expect(after.noNextStep).toBe(true)
+      expect(activityKinds(after)).toContain('TASK_CANCELLED')
+    })
+
+    test('rescheduling moves the due date and records the previous one', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      const firstDue = futureIso(2 * 60 * 60 * 1000)
+      const task = await createTask(deal.id, { kind: 'CALL', title: 'Позвонить', dueAt: firstDue })
+
+      const secondDue = futureIso(5 * 60 * 60 * 1000)
+      const rescheduled = await updateTask(task.id, { dueAt: secondDue })
+      expect(rescheduled.dueAt).toBe(secondDue)
+      expect(rescheduled.status).toBe('ACTIVE')
+
+      const after = await getDeal(deal.id)
+      expect(after.noNextStep).toBe(false)
+      const event = after.activities.find((activity) => activity.kind === 'TASK_RESCHEDULED')
+      expect(event?.metadata).toEqual({
+        taskId: task.id,
+        dueAt: secondDue,
+        previousDueAt: firstDue,
+      })
+    })
+
+    test('refuses to edit a completed or cancelled task', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      const done = await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Готово',
+        dueAt: futureIso(60 * 60 * 1000),
+      })
+      await updateTask(done.id, { status: 'COMPLETED' })
+
+      const response = await patchTaskRequest(done.id, { dueAt: futureIso(5 * 60 * 60 * 1000) })
+      expect(response.status).toBe(400)
+      expect((await response.json()).error.message).toBe(
+        'Нельзя изменить завершённую или отменённую задачу',
+      )
+    })
+
+    test('an overdue active task makes an open deal critical', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Просроченный звонок',
+        dueAt: new Date(Date.now() - 60_000).toISOString(),
+      })
+
+      const after = await getDeal(deal.id)
+      expect(after).toMatchObject({ noNextStep: true, hasOverdueTask: true, isCritical: true })
+    })
+
+    test('answers 404 for a task on no deal', async () => {
+      const missing = '01912d4e-7777-7000-8000-000000000007'
+      const response = await patchTaskRequest(missing, { status: 'COMPLETED' })
+      expect(response.status).toBe(404)
+    })
+
+    test('answers 400 for a task assigned to an unknown user', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      const ghost = '01912d4e-8888-7000-8000-000000000008'
+
+      const response = await taskRequest(deal.id, {
+        kind: 'CALL',
+        title: 'Позвонить',
+        dueAt: futureIso(60 * 60 * 1000),
+        assigneeUserId: ghost,
+      })
+      expect(response.status).toBe(400)
+      expect((await response.json()).error.message).toBe(
+        'Указан несуществующий ответственный или исполнитель',
+      )
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * Board (PRD 7.6 — board and list use one dataset)
+   * ---------------------------------------------------------------- */
+
+  describe('board', () => {
+    test('groups active deals into stage columns and excludes lost deals', async () => {
+      const fresh = await createDeal({
+        name: 'Новая',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+        potentialAmount: '65000',
+      })
+      // An overdue task makes this NEW card critical, so the board must surface it.
+      await createTask(fresh.id, {
+        kind: 'CALL',
+        title: 'Просроченный первый контакт',
+        dueAt: new Date(Date.now() - 60_000).toISOString(),
+      })
+      const qualified = await createDeal({
+        name: 'Квалифицирована',
+        phone: '+380671110002',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(qualified.id, { stage: 'QUALIFIED' })
+      const won = await createDeal({
+        name: 'Успех',
+        phone: '+380671110003',
+        source: 'teraso.com.ua',
+      })
+      await advanceToWon(won.id)
+      const lost = await createDeal({
+        name: 'Потеряна',
+        phone: '+380671110004',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(lost.id, { stage: 'LOST', lossReason: 'CURIOSITY' })
+
+      const board = await getBoard()
+
+      // The columns are exactly the active stages, in funnel order; LOST has none.
+      expect(board.columns.map((column) => column.stage)).toEqual([...ACTIVE_DEAL_STAGES])
+
+      const newColumn = boardColumn(board, 'NEW')
+      expect(newColumn.deals.map((deal) => deal.id)).toEqual([fresh.id])
+      expect(newColumn.totalCount).toBe(1)
+      expect(boardColumn(board, 'QUALIFIED').deals.map((deal) => deal.id)).toEqual([qualified.id])
+      expect(boardColumn(board, 'WON').deals.map((deal) => deal.id)).toEqual([won.id])
+      expect(boardColumn(board, 'PROPOSAL_SENT').deals).toEqual([])
+      expect(boardColumn(board, 'PREPAYMENT').deals).toEqual([])
+
+      const everyDeal = board.columns.flatMap((column) => column.deals)
+      expect(everyDeal.map((deal) => deal.id)).not.toContain(lost.id)
+
+      // The board carries served urgency and card fields, so the UI never recomputes.
+      expect(newColumn.deals[0]).toMatchObject({
+        stage: 'NEW',
+        source: 'teraso.com.ua',
+        potentialAmount: '65000.00',
+        isCritical: true,
+        noNextStep: true,
+        hasOverdueTask: true,
+      })
+      expect(newColumn.deals[0]?.nearestActiveTask?.title).toBe('Просроченный первый контакт')
+    })
+
+    test('applies the list filters to the board', async () => {
+      const target = await createDeal({
+        name: 'Сайт',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      await createDeal({ name: 'Звонок', phone: '+380671110002', source: 'Входящий звонок' })
+
+      const board = await getBoard(`source=${encodeURIComponent('teraso.com.ua')}`)
+      const ids = board.columns.flatMap((column) => column.deals.map((deal) => deal.id))
+      expect(ids).toEqual([target.id])
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * Critical tasks (PRD 7.9 — the mobile critical-task view)
+   * ---------------------------------------------------------------- */
+
+  describe('critical tasks', () => {
+    test('lists overdue active tasks on open deals, soonest first, with their deal', async () => {
+      const early = await createDeal({
+        name: 'Раньше просрочен',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      const late = await createDeal({
+        name: 'Позже просрочен',
+        phone: '+380671110002',
+        source: 'teraso.com.ua',
+      })
+      const future = await createDeal({
+        name: 'Будущая задача',
+        phone: '+380671110003',
+        source: 'teraso.com.ua',
+      })
+      const done = await createDeal({
+        name: 'Выполнена',
+        phone: '+380671110004',
+        source: 'teraso.com.ua',
+      })
+      const closed = await createDeal({
+        name: 'Выигранная с хвостом',
+        phone: '+380671110005',
+        source: 'teraso.com.ua',
+      })
+
+      const earlyTask = await createTask(early.id, {
+        kind: 'CALL',
+        title: 'Просрочен на 2 часа',
+        dueAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      })
+      const lateTask = await createTask(late.id, {
+        kind: 'CALL',
+        title: 'Просрочен на час',
+        dueAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      })
+      await createTask(future.id, {
+        kind: 'CALL',
+        title: 'Ещё впереди',
+        dueAt: futureIso(60 * 60 * 1000),
+      })
+      const doneTask = await createTask(done.id, {
+        kind: 'CALL',
+        title: 'Уже сделан',
+        dueAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      })
+      await updateTask(doneTask.id, { status: 'COMPLETED' })
+      // An overdue but still-active task on a WON deal: closed work never surfaces.
+      await advanceToWon(closed.id)
+      await createTask(closed.id, {
+        kind: 'CALL',
+        title: 'Хвост по выигранной',
+        dueAt: new Date(Date.now() - 90 * 60 * 1000).toISOString(),
+      })
+
+      const critical = await criticalTasks()
+
+      expect(critical.items.map((item) => item.task.id)).toEqual([earlyTask.id, lateTask.id])
+      expect(critical.items.map((item) => item.deal.id)).toEqual([early.id, late.id])
+      expect(critical.items[0]?.deal).toMatchObject({ isCritical: true, hasOverdueTask: true })
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
    * Helpers. Every response is parsed through its contract schema, so a
    * DTO carrying an unexpected or missing key fails the test that used it.
    * ---------------------------------------------------------------- */
@@ -1021,6 +1700,107 @@ maybeDescribe('CRM clients, deals and history integration', () => {
     expect(response.status).toBe(201)
     return dealActivityResponseSchema.parse(await response.json()).activity
   }
+
+  function stageRequest(dealId: string, body: unknown) {
+    return app.request(`/api/crm/deals/${dealId}/stage`, {
+      method: 'POST',
+      headers: jsonHeaders(ownerToken),
+      body: JSON.stringify(body),
+    })
+  }
+
+  async function changeStage(dealId: string, body: unknown): Promise<DealDetailDto> {
+    const response = await stageRequest(dealId, body)
+    expect(response.status).toBe(200)
+    return dealDetailResponseSchema.parse(await response.json()).deal
+  }
+
+  /** Walks a fresh NEW deal to WON through every mandatory step, with payments. */
+  async function advanceToWon(dealId: string): Promise<DealDetailDto> {
+    await changeStage(dealId, { stage: 'QUALIFIED' })
+    await changeStage(dealId, { stage: 'PROPOSAL_SENT' })
+    await changeStage(dealId, {
+      stage: 'PREPAYMENT',
+      prepaymentAmount: '20000',
+      prepaymentPaidAt: '2026-07-20T09:00:00.000Z',
+    })
+    return changeStage(dealId, {
+      stage: 'WON',
+      fullPaymentAmount: '100000',
+      fullPaymentPaidAt: '2026-07-22T09:00:00.000Z',
+    })
+  }
+
+  function taskRequest(dealId: string, body: unknown) {
+    return app.request(`/api/crm/deals/${dealId}/tasks`, {
+      method: 'POST',
+      headers: jsonHeaders(ownerToken),
+      body: JSON.stringify(body),
+    })
+  }
+
+  async function createTask(dealId: string, body: unknown): Promise<DealTaskDto> {
+    const response = await taskRequest(dealId, body)
+    expect(response.status).toBe(201)
+    return dealTaskResponseSchema.parse(await response.json()).task
+  }
+
+  function patchTaskRequest(taskId: string, body: unknown) {
+    return app.request(`/api/crm/tasks/${taskId}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(ownerToken),
+      body: JSON.stringify(body),
+    })
+  }
+
+  async function updateTask(taskId: string, body: unknown): Promise<DealTaskDto> {
+    const response = await patchTaskRequest(taskId, body)
+    expect(response.status).toBe(200)
+    return dealTaskResponseSchema.parse(await response.json()).task
+  }
+
+  async function getBoard(query = '') {
+    const response = await app.request(`/api/crm/deals/board${query ? `?${query}` : ''}`, {
+      headers: jsonHeaders(ownerToken),
+    })
+    expect(response.status).toBe(200)
+    return dealBoardResponseSchema.parse(await response.json())
+  }
+
+  function boardColumn(board: Awaited<ReturnType<typeof getBoard>>, stage: string) {
+    const column = board.columns.find((entry) => entry.stage === stage)
+    if (!column) throw new Error(`board is missing the ${stage} column`)
+    return column
+  }
+
+  async function criticalTasks() {
+    const response = await app.request('/api/crm/tasks/critical', {
+      headers: jsonHeaders(ownerToken),
+    })
+    expect(response.status).toBe(200)
+    return criticalTasksResponseSchema.parse(await response.json())
+  }
+
+  function activityKinds(deal: DealDetailDto) {
+    return deal.activities.map((activity) => activity.kind)
+  }
+
+  /**
+   * A contract-level rejection surfaces as VALIDATION_ERROR with the specific
+   * message inside `details` (a Zod issue list), whereas a domain `CrmFailure`
+   * puts its message on `error.message`. The payment-field and loss-reason rules
+   * are enforced by the contract, so they are asserted against the issue list.
+   */
+  async function expectValidationMessage(response: Response, message: string) {
+    expect(response.status).toBe(400)
+    const body = (await response.json()) as {
+      error: { code: string; details?: Array<{ message?: string }> }
+    }
+    expect(body.error.code).toBe('VALIDATION_ERROR')
+    expect(body.error.details?.some((issue) => issue.message === message)).toBe(true)
+  }
+
+  const futureIso = (msFromNow: number) => new Date(Date.now() + msFromNow).toISOString()
 
   async function listDeals(query: string) {
     const response = await app.request(`/api/crm/deals${query ? `?${query}` : ''}`, {

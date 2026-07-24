@@ -1,6 +1,7 @@
 import {
+  ACTIVE_DEAL_STAGES,
   OPEN_DEAL_STAGES,
-  type DealListQuery,
+  type DealBoardQuery,
   type DealSortField,
   type SortDirection,
 } from '@teraso-crm/contracts'
@@ -42,7 +43,31 @@ export function likePattern(value: string): string {
 
 const openStagesSql = Prisma.sql`(${Prisma.join(OPEN_DEAL_STAGES.map((stage) => Prisma.sql`${stage}::deal_stage`))})`
 
-export function listConditions(query: DealListQuery, now: Date): Prisma.Sql[] {
+/** The board's columns, LOST excluded — the same set the DTO groups into. */
+export const activeStagesSql = Prisma.sql`(${Prisma.join(ACTIVE_DEAL_STAGES.map((stage) => Prisma.sql`${stage}::deal_stage`))})`
+
+/**
+ * The nearest ACTIVE task per deal as a lateral join. The list and the board
+ * both build on this exact fragment so `nearest_task.due_at` means one thing on
+ * both surfaces — the quick-flag predicates below and the board reuse it rather
+ * than each spelling the subquery out and risking a silent divergence.
+ */
+export const nearestActiveTaskLateral = Prisma.sql`
+  LEFT JOIN LATERAL (
+    SELECT t.due_at
+    FROM deal_tasks t
+    WHERE t.deal_id = d.id AND t.status = 'ACTIVE'::task_status
+    ORDER BY t.due_at ASC, t.id ASC
+    LIMIT 1
+  ) nearest_task ON TRUE
+`
+
+/**
+ * Accepts the shared filter base (`DealBoardQuery`); the list passes its wider
+ * query, whose extra paging and sort keys this function never reads, so board
+ * and list select rows through one predicate builder.
+ */
+export function listConditions(query: DealBoardQuery, now: Date): Prisma.Sql[] {
   const conditions: Prisma.Sql[] = []
 
   if (query.q) {

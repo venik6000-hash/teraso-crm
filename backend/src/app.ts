@@ -80,6 +80,8 @@ export function createApp({
     // inheriting bearer-auth rate limiting or the auth body limit.
     app.use('/api/crm/deals', middleware)
     app.use('/api/crm/deals/*', middleware)
+    app.use('/api/crm/tasks', middleware)
+    app.use('/api/crm/tasks/*', middleware)
     app.use('/api/crm/clients/*', middleware)
   }
   app.get('/', (c) => {

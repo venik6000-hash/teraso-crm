@@ -4,6 +4,7 @@ import type { DbClient } from '../../db'
 import type { AuthHttpEnv } from '../auth'
 import { CrmService } from './application/crm-service'
 import type { Clock } from './application/ports'
+import { TaskService } from './application/task-service'
 import { createPrismaCrmRepository } from './infrastructure/crm-repository'
 import { createCrmRoutes } from './transport/routes'
 
@@ -24,12 +25,16 @@ const systemClock: Clock = { now: () => new Date() }
  * carving an exception out of the authenticated security glob in app.ts.
  */
 export function createCrmModule({ clock = systemClock, db, requireAuth }: CreateCrmModuleOptions) {
-  const service = new CrmService({ clock, repository: createPrismaCrmRepository(db) })
+  const repository = createPrismaCrmRepository(db)
+  const service = new CrmService({ clock, repository })
+  const taskService = new TaskService({ clock, repository })
   return {
     service,
-    routes: createCrmRoutes({ requireAuth, service }),
+    taskService,
+    routes: createCrmRoutes({ requireAuth, service, taskService }),
   }
 }
 
 export { CrmService } from './application/crm-service'
+export { TaskService } from './application/task-service'
 export type { CrmRepository } from './application/ports'

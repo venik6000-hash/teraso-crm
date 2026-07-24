@@ -35,11 +35,17 @@ const app = createApp({ env, prisma: {} as DbClient })
 
 const dealId = '01912d4e-1111-7000-8000-000000000001'
 const clientId = '01912d4e-2222-7000-8000-000000000002'
+const taskId = '01912d4e-3333-7000-8000-000000000003'
 
 const protectedRequests: ReadonlyArray<readonly [string, RequestInit | undefined]> = [
   ['/api/crm/deals', undefined],
   ['/api/crm/deals?stage=NEW&noNextStep=true', undefined],
+  ['/api/crm/deals/board', undefined],
+  ['/api/crm/deals/board?stage=NEW', undefined],
   [`/api/crm/deals/${dealId}`, undefined],
+  // Both /tasks routes match neither /deals nor /clients: without their own guard
+  // these would answer to an anonymous caller over a CRM full of customer PII.
+  ['/api/crm/tasks/critical', undefined],
   ['/api/crm/clients/lookup?phone=%2B380935335353', undefined],
   [`/api/crm/clients/${clientId}`, undefined],
   [
@@ -59,11 +65,35 @@ const protectedRequests: ReadonlyArray<readonly [string, RequestInit | undefined
     },
   ],
   [
+    `/api/crm/deals/${dealId}/stage`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: 'QUALIFIED' }),
+    },
+  ],
+  [
+    `/api/crm/deals/${dealId}/tasks`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'CALL', title: 'Позвонить', dueAt: '2026-07-23T12:00:00.000Z' }),
+    },
+  ],
+  [
     `/api/crm/deals/${dealId}/notes`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: 'Звонил, просил перезвонить' }),
+    },
+  ],
+  [
+    `/api/crm/tasks/${taskId}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'COMPLETED' }),
     },
   ],
 ]
@@ -77,6 +107,26 @@ describe('CRM route authentication', () => {
       expect(`${path} -> ${response.status}`).toBe(`${path} -> 401`)
       expect((await response.json()).error.code).toBe('UNAUTHORIZED')
     }
+  })
+
+  /**
+   * The /tasks surface is guarded by its own `routes.use('/tasks', ...)` and
+   * `routes.use('/tasks/*', ...)`, because it matches no other prefix. Pinned
+   * explicitly so a future reorder of the sweep above cannot quietly drop it and
+   * ship an unauthenticated task-mutation endpoint.
+   */
+  test('guards both /tasks routes behind authentication', async () => {
+    const critical = await app.request('/api/crm/tasks/critical')
+    expect(critical.status).toBe(401)
+    expect((await critical.json()).error.code).toBe('UNAUTHORIZED')
+
+    const update = await app.request(`/api/crm/tasks/${taskId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'COMPLETED' }),
+    })
+    expect(update.status).toBe(401)
+    expect((await update.json()).error.code).toBe('UNAUTHORIZED')
   })
 
   test('rejects a malformed and an unsigned bearer token alike', async () => {
@@ -124,8 +174,13 @@ describe('CRM route registration', () => {
     expect(Object.keys(document.paths)).toEqual(
       expect.arrayContaining([
         '/api/crm/deals',
+        '/api/crm/deals/board',
         '/api/crm/deals/{dealId}',
+        '/api/crm/deals/{dealId}/stage',
+        '/api/crm/deals/{dealId}/tasks',
         '/api/crm/deals/{dealId}/notes',
+        '/api/crm/tasks/{taskId}',
+        '/api/crm/tasks/critical',
         '/api/crm/clients/lookup',
         '/api/crm/clients/{clientId}',
       ]),
