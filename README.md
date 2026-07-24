@@ -12,7 +12,7 @@ This repository was initialized from the [Vibe Coding Template](https://github.c
 - Deferred surfaces are `website` and `mobile`. They stay on disk untouched; do not configure, run, or extend them until they are explicitly requested.
 - PostgreSQL runs locally through Docker Compose. Start the `postgres` service by hand; the `postgres_test` service belongs to the test runners and must never be started manually. See "Local PostgreSQL And The Compose Project Trap". There is no native PostgreSQL install and no cloud database in local development.
 - Deployment is outside MVP. No cloud account setup, no production secrets, and no remote Git publication are in scope. `.do/` specs and `docs/DEPLOYMENT.md` stay committed for a later release decision.
-- Validation scope for the active surfaces: `bun run test:contracts`, `bun run architecture:check`, `bun run test:backend`, `bun run test:webapp`, and `bun run typecheck`.
+- Validation scope for the active surfaces: `bun run test:contracts`, `bun run architecture:check`, `bun run test:deploy`, `bun run test:backend`, `bun run test:webapp`, and `bun run typecheck`. `test:deploy` is the only suite covering `scripts/repo-env.test.mjs` and `scripts/architecture-check.test.mjs`, and CI runs it.
 - Business rules that apply repository-wide: all UI copy, stage labels, task types, loss reasons, and validation feedback are in Russian; the business time zone is Europe/Kyiv; money is stored as PostgreSQL `Decimal(14,2)` and exposed as decimal strings in UAH.
 - `backend/.env` and `webapp/.env` are local-only files created from their `.env.example` siblings. They are gitignored and must never be committed.
 
@@ -87,7 +87,7 @@ bun run --cwd backend prisma:generate
 bun run --cwd backend prisma:deploy
 ```
 
-Registration and social sign-in always create the `user` role. To make the local
+Registration always creates the `user` role. To make the local
 administrator usable, set `ADMIN_SEED_PASSWORD` in `backend/.env`, then run the
 idempotent seed:
 
@@ -105,11 +105,11 @@ password preserves existing sessions.
 **Start `postgres` by hand. Never start `postgres_test` by hand.** Both services live in the same `docker-compose.yml`, but they are owned by different Docker Compose projects at runtime, and starting the test service manually breaks the test suite.
 
 - `docker compose --env-file backend/.env ...` uses the **directory-derived** project name. In this checkout the directory is `CRM Teraso`, so the project is `crmteraso` and the dev container is `crmteraso-postgres-1` on port `54329`. The development data — applied migrations and the seeded administrator — lives in the `crmteraso_postgres_18_data` volume owned by that project.
-- The test runners (`test:backend:integration`, `smoke:docker`, `e2e:webapp`) use the **repository-hash-derived** project name from `scripts/repo-env.mjs`, currently `teraso-crm-<repohash>`. They bring up their own `postgres_test`, choose its port, apply migrations to `teraso_crm_test`, and own its lifecycle.
+- The test runners (`test:backend:integration`, `smoke:backend:docker`, `e2e:webapp`) use the **repository-hash-derived** project name from `scripts/repo-env.mjs`, currently `teraso-crm-<repohash>`. They bring up their own `postgres_test`, choose its port, apply migrations to `teraso_crm_test`, and own its lifecycle.
 
 Two consequences worth internalizing:
 
-- Running `docker compose --env-file backend/.env up -d postgres_test` binds host port `54330` under the `crmteraso` project. The runner then tries to bind the same port under its own project and dies with `Bind for 127.0.0.1:54330 failed: port is already allocated`. If you ever see that error, remove the stray manual container: `docker compose --env-file backend/.env rm -f -s -v postgres_test`.
+- Running `docker compose --env-file backend/.env up -d postgres_test` binds host port `54330` under the `crmteraso` project. The runner then tries to bind the same port under its own project and dies with `Bind for 127.0.0.1:54330 failed: port is already allocated`. If you ever see that error, remove the container you created by mistake — and only that one: `docker compose --env-file backend/.env rm -f -s -v postgres_test`. This removes an anonymous-volume-free container you started in error; it is not the forbidden practice of killing a process to free a port. Never force-remove a container you did not start.
 - Never pass an explicit `-p` flag to the manual dev commands. A different project name silently creates a *second, empty* development database with no error, and the seeded administrator appears to vanish.
 
 To reset local development data, follow "Reset Local Data" in [docs/LOCAL_DATABASE.md](docs/LOCAL_DATABASE.md). Never run `docker compose down -v` against the dev project casually; it destroys the seeded administrator and every applied migration.

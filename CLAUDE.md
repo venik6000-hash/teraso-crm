@@ -75,7 +75,7 @@
 
 ## Git And Remote Policy
 
-- Work on `main`. Do not create, switch to, or suggest new branches without request. The user has approved committing directly to `main` for this project.
+- Work on `main`. Do not create, switch to, or suggest new branches without request. When you are asked to commit, commit to `main` — do not create a branch. Committing is still governed by the rule in Safety And Workspace Hygiene: do not commit unless explicitly asked.
 - This repository has no Git remote, and that is intentional. `git remote -v` is empty.
 - Do not add a remote, push, or open pull requests. Repository publication is out of MVP scope; if the user later wants to publish, they must ask for it explicitly and provide the destination.
 - Inspect `git status --short --branch` before committing so unrelated or generated files are not swept into a commit.
@@ -202,7 +202,7 @@
 
 ## Safety And Workspace Hygiene
 
-- Never stop or kill processes just to free ports. Use isolated ports, alternate URLs, or test config overrides.
+- Never stop or kill processes just to free ports. Use isolated ports, alternate URLs, or test config overrides. The single exception is a container this repository's own documentation tells you never to start: a manually started `postgres_test` may be removed as described in the README's "Local PostgreSQL And The Compose Project Trap". Do not extend that exception to any other container or process.
 - Do not propose or implement CI/CD, hosted automation, deployment pipelines, or release ceremony unless explicitly asked.
 - Add automation only when it removes real repeated pain.
 - Do not print secrets, tokens, private keys, credentials, cookies, customer data, or raw `.env` values in final responses.
