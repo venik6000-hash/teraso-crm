@@ -1,9 +1,9 @@
 import {
   DEAL_DETAIL_ACTIVITY_LIMIT,
   DEAL_DETAIL_TASK_LIMIT,
+  dealActivityMetadataSchema,
   type ClientSummaryDto,
   type DealActivityDto,
-  type DealActivityMetadata,
   type DealDetailDto,
   type DealSummaryDto,
   type DealTaskDto,
@@ -203,11 +203,13 @@ export function toActivityDto(activity: ActivityRow): DealActivityDto {
     authorUserId: activity.authorUserId,
     authorName: personName(activity.author),
     /**
-     * Metadata is written only by this module against the strict contract
-     * schema, so it is presented as stored. The integration test parses every
-     * response through that schema, which is where an unregistered key fails.
+     * Parsed, not cast: `appendActivity` types every write against this schema so
+     * a stray key is already a compile error, and parsing on the way out closes
+     * the gap in production too — a malformed row fails loudly here instead of
+     * shipping to clients and only being caught if a test happens to parse it.
      */
-    metadata: (activity.metadata ?? null) as DealActivityMetadata | null,
+    metadata:
+      activity.metadata == null ? null : dealActivityMetadataSchema.parse(activity.metadata),
     createdAt: activity.createdAt.toISOString(),
   }
 }

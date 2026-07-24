@@ -1659,9 +1659,107 @@ maybeDescribe('CRM clients, deals and history integration', () => {
   })
 
   /* ---------------------------------------------------------------- *
+   * Concurrency: a stage move or task edit is a read-then-write against
+   * mutable state, so two racing requests on one entity must not both commit.
+   * The pool is pre-warmed first, or the requests serialize on a cold pool and
+   * the race never happens — the false green the same-phone test warns about.
+   * ---------------------------------------------------------------- */
+
+  describe('concurrent mutations', () => {
+    test('serializes two conflicting stage moves so exactly one wins', async () => {
+      const deal = await createDeal({
+        name: 'Гонка этапов',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(deal.id, { stage: 'QUALIFIED' })
+      await changeStage(deal.id, { stage: 'PROPOSAL_SENT' })
+      await changeStage(deal.id, {
+        stage: 'PREPAYMENT',
+        prepaymentAmount: '20000',
+        prepaymentPaidAt: '2026-07-20T09:00:00.000Z',
+      })
+
+      await warmPool()
+
+      // Fire WON and LOST at once. Both read PREPAYMENT if unserialized, both
+      // validate legal against it, and both would commit.
+      const [wonResult, lostResult] = await Promise.all([
+        stageRequest(deal.id, {
+          stage: 'WON',
+          fullPaymentAmount: '100000',
+          fullPaymentPaidAt: '2026-07-22T09:00:00.000Z',
+        }),
+        stageRequest(deal.id, { stage: 'LOST', lossReason: 'CHOSEN_COMPETITOR' }),
+      ])
+
+      // Exactly one is accepted; the loser re-reads the fresh stage and is refused
+      // as an illegal transition.
+      expect([wonResult.status, lostResult.status].sort()).toEqual([200, 400])
+
+      const final = await getDeal(deal.id)
+      // The surviving state is internally consistent — never a LOST deal that still
+      // carries a full payment the dashboard would report as revenue.
+      if (final.stage === 'WON') {
+        expect(final.fullPaymentAmount).toBe('100000.00')
+        expect(final.lossReason).toBeNull()
+      } else {
+        expect(final.stage).toBe('LOST')
+        expect(final.lossReason).toBe('CHOSEN_COMPETITOR')
+        expect(final.fullPaymentAmount).toBeNull()
+      }
+
+      // Exactly one closing transition was recorded — no contradictory WON+LOST pair.
+      const closing = final.activities
+        .filter((activity) => activity.kind === 'STAGE_CHANGED')
+        .map((activity) => activity.toStage)
+        .filter((stage) => stage === 'WON' || stage === 'LOST')
+      expect(closing).toHaveLength(1)
+    })
+
+    test('serializes two conflicting task edits so the log tells one story', async () => {
+      const deal = await createDeal({
+        name: 'Гонка задач',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      const task = await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Позвонить',
+        dueAt: futureIso(3 * 60 * 60 * 1000),
+      })
+
+      await warmPool()
+
+      const [completeResult, cancelResult] = await Promise.all([
+        patchTaskRequest(task.id, { status: 'COMPLETED' }),
+        patchTaskRequest(task.id, { status: 'CANCELLED' }),
+      ])
+
+      expect([completeResult.status, cancelResult.status].sort()).toEqual([200, 400])
+
+      const detail = await getDeal(deal.id)
+      const terminal = detail.activities.filter(
+        (activity) => activity.kind === 'TASK_COMPLETED' || activity.kind === 'TASK_CANCELLED',
+      )
+      // One terminal event, matching the task's single final status.
+      expect(terminal).toHaveLength(1)
+      const finalTask = detail.tasks.find((entry) => entry.id === task.id)
+      expect(finalTask?.status).toBe(
+        terminal[0]?.kind === 'TASK_COMPLETED' ? 'COMPLETED' : 'CANCELLED',
+      )
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
    * Helpers. Every response is parsed through its contract schema, so a
    * DTO carrying an unexpected or missing key fails the test that used it.
    * ---------------------------------------------------------------- */
+
+  /** Opens several pool connections so a following Promise.all truly races. */
+  async function warmPool() {
+    await Promise.all(Array.from({ length: 8 }, () => prisma.$queryRaw`SELECT 1`))
+  }
 
   async function createDeal(payload: DealCreateInput): Promise<DealDetailDto> {
     const response = await app.request('/api/crm/deals', {

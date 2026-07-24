@@ -7,11 +7,14 @@ import {
   type ClientDetailDto,
   type ClientLookupResponse,
   type CriticalTasksResponse,
+  type DealActivityKind,
   type DealActivityMetadata,
   type DealBoardResponse,
   type DealDetailDto,
+  type DealStage,
   type DealSummaryDto,
   type DealTaskDto,
+  type TaskCreateInput,
 } from '@teraso-crm/contracts'
 
 import type { DbClient } from '../../../db'
@@ -37,6 +40,7 @@ import {
   toDealDetail,
   toDealSummary,
   toTaskDto,
+  type ActivityRow,
   type DealSummaryRow,
   type TaskRow,
 } from './deal-mappers'
@@ -193,16 +197,12 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
       const deal = await db.deal.findUnique({ where: { id: dealId }, select: { id: true } })
       if (!deal) return null
 
-      const activity = await db.dealActivity.create({
-        data: {
-          dealId,
-          kind: 'NOTE_ADDED',
-          text,
-          authorUserId: actorUserId,
-          createdAt: now,
-          metadata: Prisma.DbNull,
-        },
-        select: activitySelect,
+      const activity = await appendActivity(db, {
+        dealId,
+        kind: 'NOTE_ADDED',
+        text,
+        authorUserId: actorUserId,
+        now,
       })
       return toActivityDto(activity)
     },
@@ -328,6 +328,110 @@ async function createDealTransaction(db: DbClient, command: DealCreateCommand): 
 
 type TransactionClient = Parameters<Parameters<DbClient['$transaction']>[0]>[0]
 
+/* ------------------------------------------------------------------ *
+ * Shared transaction helpers
+ * ------------------------------------------------------------------ */
+
+/**
+ * A per-entity advisory lock, held for the transaction and released on commit or
+ * rollback. Every read-then-write on a single deal or task acquires it as the
+ * first statement, so a second racing caller blocks until the first commits, then
+ * reads the committed state and re-validates against it. Without this, two
+ * concurrent stage moves both read the same `from` stage, both pass the funnel
+ * rule and both commit — leaving a state the rule itself forbids. Mirrors
+ * db.ts's `acquireUserAuthenticationAuthorityLock` for the auth transition.
+ */
+function lockDeal(tx: Pick<TransactionClient, '$executeRaw'>, dealId: string) {
+  return tx.$executeRaw(
+    Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`crm-deal:${dealId}`}, 0))`,
+  )
+}
+
+function lockTask(tx: Pick<TransactionClient, '$executeRaw'>, taskId: string) {
+  return tx.$executeRaw(
+    Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`crm-task:${taskId}`}, 0))`,
+  )
+}
+
+type AppendActivityInput = {
+  dealId: string
+  kind: DealActivityKind
+  authorUserId: string | null
+  now: Date
+  fromStage?: DealStage | null
+  toStage?: DealStage | null
+  text?: string | null
+  metadata?: DealActivityMetadata | null
+}
+
+/**
+ * The single writer for every timeline row. Centralizing the shape keeps
+ * `fromStage`/`toStage` paired on the stage rows, forces `metadata` through the
+ * typed contract so a stray key is a compile error rather than a value that ships
+ * silently to clients, and represents "no metadata" as SQL NULL (`Prisma.DbNull`)
+ * in exactly one place. Returns the hydrated row so the note endpoint serializes
+ * its result directly; every other caller ignores the return.
+ */
+function appendActivity(tx: TransactionClient, input: AppendActivityInput): Promise<ActivityRow> {
+  return tx.dealActivity.create({
+    data: {
+      dealId: input.dealId,
+      kind: input.kind,
+      text: input.text ?? null,
+      fromStage: input.fromStage ?? null,
+      toStage: input.toStage ?? null,
+      authorUserId: input.authorUserId,
+      createdAt: input.now,
+      metadata: input.metadata ?? Prisma.DbNull,
+    },
+    select: activitySelect,
+  })
+}
+
+/**
+ * Creates a task and its TASK_CREATED row inside a caller's transaction. Both the
+ * manual initial-task path and the standalone endpoint compose it, and Task 5's
+ * inbound handler will compose it into the same transaction as the deal and the
+ * INBOUND_LEAD_RECEIVED row instead of re-inlining the same shape a fourth time.
+ */
+async function insertTaskWithinTx(
+  tx: TransactionClient,
+  params: {
+    dealId: string
+    task: TaskCreateInput
+    actorUserId: string | null
+    now: Date
+    fallbackAssigneeUserId: string | null
+  },
+): Promise<TaskRow> {
+  const created = await tx.dealTask.create({
+    data: {
+      dealId: params.dealId,
+      kind: params.task.kind,
+      title: params.task.title,
+      dueAt: new Date(params.task.dueAt),
+      // Absent assignee means the deal's responsible user, or nobody — never the
+      // caller's identity.
+      assigneeUserId: params.task.assigneeUserId ?? params.fallbackAssigneeUserId,
+    },
+    select: taskSelect,
+  })
+
+  await appendActivity(tx, {
+    dealId: params.dealId,
+    kind: 'TASK_CREATED',
+    authorUserId: params.actorUserId,
+    now: params.now,
+    metadata: {
+      taskId: created.id,
+      taskKind: created.kind,
+      dueAt: created.dueAt.toISOString(),
+    },
+  })
+
+  return created
+}
+
 async function insertDeal(tx: TransactionClient, command: DealCreateCommand): Promise<string> {
   const { input, phoneNormalized, actorUserId, now } = command
 
@@ -374,52 +478,28 @@ async function insertDeal(tx: TransactionClient, command: DealCreateCommand): Pr
     select: { id: true, responsibleUserId: true },
   })
 
-  await tx.dealActivity.create({
-    data: {
-      dealId: deal.id,
-      kind: 'DEAL_CREATED',
-      authorUserId: actorUserId,
-      createdAt: now,
-      metadata: Prisma.DbNull,
-    },
+  await appendActivity(tx, {
+    dealId: deal.id,
+    kind: 'DEAL_CREATED',
+    authorUserId: actorUserId,
+    now,
   })
 
+  /**
+   * The initial task shares DEAL_CREATED's timestamp. The timeline orders by
+   * `(createdAt desc, id desc)` and `uuidv7()` ids are monotonic within a
+   * transaction, so the later-inserted TASK_CREATED row already sorts after
+   * DEAL_CREATED by id — no per-transaction time offset to invent. It composes
+   * the same `insertTaskWithinTx` the standalone endpoint uses, so the metadata
+   * shape lives in one place.
+   */
   if (input.initialTask) {
-    const task = await tx.dealTask.create({
-      data: {
-        dealId: deal.id,
-        kind: input.initialTask.kind,
-        title: input.initialTask.title,
-        dueAt: new Date(input.initialTask.dueAt),
-        /**
-         * Absent means "let the server decide": the deal's responsible user, or
-         * nobody when the deal itself has none. The caller's identity is never
-         * inferred as the assignee.
-         */
-        assigneeUserId: input.initialTask.assigneeUserId ?? deal.responsibleUserId,
-      },
-      select: { id: true, kind: true, dueAt: true },
-    })
-
-    await tx.dealActivity.create({
-      data: {
-        dealId: deal.id,
-        kind: 'TASK_CREATED',
-        authorUserId: actorUserId,
-        /**
-         * Shares DEAL_CREATED's timestamp. The timeline orders by
-         * `(createdAt desc, id desc)` and `uuidv7()` ids are monotonic within a
-         * transaction, so this later-inserted row already sorts after
-         * DEAL_CREATED by id — no per-transaction time offset to invent, and
-         * later multi-event transactions (Task 4, Task 5) stay collision-free.
-         */
-        createdAt: now,
-        metadata: {
-          taskId: task.id,
-          taskKind: task.kind,
-          dueAt: task.dueAt.toISOString(),
-        } satisfies DealActivityMetadata,
-      },
+    await insertTaskWithinTx(tx, {
+      dealId: deal.id,
+      task: input.initialTask,
+      actorUserId,
+      now,
+      fallbackAssigneeUserId: deal.responsibleUserId,
     })
   }
 
@@ -452,6 +532,9 @@ async function applyDealUpdate(db: DbClient, command: DealUpdateCommand): Promis
 
   try {
     return await db.$transaction(async (tx) => {
+      // Serialize concurrent edits of one deal so the FIELD_UPDATED `before`
+      // values reflect the committed state, not a stale read.
+      await lockDeal(tx, dealId)
       const existing = await tx.deal.findUnique({
         where: { id: dealId },
         select: {
@@ -526,14 +609,12 @@ async function applyDealUpdate(db: DbClient, command: DealUpdateCommand): Promis
 
       // A PATCH that changes nothing writes no history: the log records real edits.
       if (changes.length > 0) {
-        await tx.dealActivity.create({
-          data: {
-            dealId,
-            kind: 'FIELD_UPDATED',
-            authorUserId: actorUserId,
-            createdAt: now,
-            metadata: { changes } satisfies DealActivityMetadata,
-          },
+        await appendActivity(tx, {
+          dealId,
+          kind: 'FIELD_UPDATED',
+          authorUserId: actorUserId,
+          now,
+          metadata: { changes },
         })
       }
 
@@ -563,6 +644,10 @@ async function applyStageChange(db: DbClient, command: DealStageChangeCommand): 
 
   try {
     return await db.$transaction(async (tx) => {
+      // Serialize concurrent moves on one deal: the funnel rule is validated
+      // against the stage read here, so a second caller must block, then read the
+      // committed stage and be refused if its move is no longer legal.
+      await lockDeal(tx, dealId)
       const existing = await tx.deal.findUnique({
         where: { id: dealId },
         select: { id: true, stage: true },
@@ -609,31 +694,23 @@ async function applyStageChange(db: DbClient, command: DealStageChangeCommand): 
       // the transition row so the stage event sorts newest on the shared `now`
       // via the monotonic uuidv7 id tiebreaker — no per-event time offset.
       if (input.comment) {
-        await tx.dealActivity.create({
-          data: {
-            dealId,
-            kind: 'NOTE_ADDED',
-            text: input.comment,
-            authorUserId: actorUserId,
-            createdAt: now,
-            metadata: Prisma.DbNull,
-          },
+        await appendActivity(tx, {
+          dealId,
+          kind: 'NOTE_ADDED',
+          text: input.comment,
+          authorUserId: actorUserId,
+          now,
         })
       }
 
-      await tx.dealActivity.create({
-        data: {
-          dealId,
-          kind: transition.kind === 'reopen' ? 'REOPENED' : 'STAGE_CHANGED',
-          authorUserId: actorUserId,
-          createdAt: now,
-          fromStage: existing.stage,
-          toStage: input.stage,
-          metadata:
-            transition.kind === 'lose'
-              ? ({ lossReason: input.lossReason! } satisfies DealActivityMetadata)
-              : Prisma.DbNull,
-        },
+      await appendActivity(tx, {
+        dealId,
+        kind: transition.kind === 'reopen' ? 'REOPENED' : 'STAGE_CHANGED',
+        authorUserId: actorUserId,
+        now,
+        fromStage: existing.stage,
+        toStage: input.stage,
+        metadata: transition.kind === 'lose' ? { lossReason: input.lossReason! } : null,
       })
 
       return true
@@ -658,34 +735,15 @@ async function insertTask(db: DbClient, command: TaskCreateCommand): Promise<Tas
       })
       if (!deal) return null
 
-      const task = await tx.dealTask.create({
-        data: {
-          dealId,
-          kind: input.kind,
-          title: input.title,
-          dueAt: new Date(input.dueAt),
-          // Absent assignee means the deal's responsible user, or nobody — never
-          // the caller's identity, matching the initial-task rule on create.
-          assigneeUserId: input.assigneeUserId ?? deal.responsibleUserId,
-        },
-        select: taskSelect,
+      // No lock here: a task insert appends rather than validating against mutable
+      // deal state, so two concurrent creates are both correct.
+      return insertTaskWithinTx(tx, {
+        dealId,
+        task: input,
+        actorUserId,
+        now,
+        fallbackAssigneeUserId: deal.responsibleUserId,
       })
-
-      await tx.dealActivity.create({
-        data: {
-          dealId,
-          kind: 'TASK_CREATED',
-          authorUserId: actorUserId,
-          createdAt: now,
-          metadata: {
-            taskId: task.id,
-            taskKind: task.kind,
-            dueAt: task.dueAt.toISOString(),
-          } satisfies DealActivityMetadata,
-        },
-      })
-
-      return task
     })
   } catch (error) {
     throw translateWriteError(error)
@@ -702,6 +760,10 @@ async function applyTaskUpdate(db: DbClient, command: TaskUpdateCommand): Promis
 
   try {
     return await db.$transaction(async (tx) => {
+      // Serialize concurrent edits of one task: the terminal-state guard below is
+      // validated against this read, so two racing completions (or a complete and
+      // a cancel) cannot both pass it and write contradictory TASK_* rows.
+      await lockTask(tx, taskId)
       const existing = await tx.dealTask.findUnique({
         where: { id: taskId },
         select: { id: true, dealId: true, status: true, dueAt: true },
@@ -731,14 +793,32 @@ async function applyTaskUpdate(db: DbClient, command: TaskUpdateCommand): Promis
       // same-request due-date change; a bare due change on a still-active task is
       // a reschedule; a title/kind/assignee-only edit records nothing.
       if (input.status === 'COMPLETED') {
-        await writeTaskActivity(tx, existing.dealId, 'TASK_COMPLETED', actorUserId, now, { taskId })
+        await appendActivity(tx, {
+          dealId: existing.dealId,
+          kind: 'TASK_COMPLETED',
+          authorUserId: actorUserId,
+          now,
+          metadata: { taskId },
+        })
       } else if (input.status === 'CANCELLED') {
-        await writeTaskActivity(tx, existing.dealId, 'TASK_CANCELLED', actorUserId, now, { taskId })
+        await appendActivity(tx, {
+          dealId: existing.dealId,
+          kind: 'TASK_CANCELLED',
+          authorUserId: actorUserId,
+          now,
+          metadata: { taskId },
+        })
       } else if (dueChanged) {
-        await writeTaskActivity(tx, existing.dealId, 'TASK_RESCHEDULED', actorUserId, now, {
-          taskId,
-          dueAt: new Date(input.dueAt!).toISOString(),
-          previousDueAt: existing.dueAt.toISOString(),
+        await appendActivity(tx, {
+          dealId: existing.dealId,
+          kind: 'TASK_RESCHEDULED',
+          authorUserId: actorUserId,
+          now,
+          metadata: {
+            taskId,
+            dueAt: new Date(input.dueAt!).toISOString(),
+            previousDueAt: existing.dueAt.toISOString(),
+          },
         })
       }
 
@@ -747,19 +827,6 @@ async function applyTaskUpdate(db: DbClient, command: TaskUpdateCommand): Promis
   } catch (error) {
     throw translateWriteError(error)
   }
-}
-
-function writeTaskActivity(
-  tx: TransactionClient,
-  dealId: string,
-  kind: 'TASK_COMPLETED' | 'TASK_CANCELLED' | 'TASK_RESCHEDULED',
-  authorUserId: string,
-  now: Date,
-  metadata: DealActivityMetadata,
-) {
-  return tx.dealActivity.create({
-    data: { dealId, kind, authorUserId, createdAt: now, metadata },
-  })
 }
 
 /* ------------------------------------------------------------------ *

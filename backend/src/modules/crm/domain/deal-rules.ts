@@ -121,7 +121,15 @@ const stageLabels: Record<DealStage, string> = {
 const losableStages = new Set<DealStage>(OPEN_DEAL_STAGES)
 const reopenableStages = new Set<DealStage>(['WON', 'LOST'])
 
-/** A money string is a real amount only when it is present and above zero. */
+/**
+ * A money string is a real amount only when it is present and above zero.
+ *
+ * This is the authoritative "> 0" rule for a payment-bearing stage. The contract
+ * `moneyAmountSchema` deliberately accepts "0.00" as a valid *format*, and
+ * `dealStageChangeSchema.superRefine` (packages/contracts/src/crm.ts) only checks
+ * presence — so the same rule lives in two encodings. A future payment-bearing
+ * stage must update both sites; the superRefine carries the reciprocal note.
+ */
 function isPositiveAmount(amount: string | null | undefined): boolean {
   return amount != null && Number(amount) > 0
 }
