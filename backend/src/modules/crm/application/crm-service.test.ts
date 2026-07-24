@@ -7,6 +7,7 @@ import type {
   DealDetailDto,
   DealListPage,
   DealTaskDto,
+  InboundQuizLeadInput,
 } from '@teraso-crm/contracts'
 
 import type { AuthenticatedPrincipal } from '../../auth'
@@ -17,6 +18,7 @@ import type {
   DealCreateCommand,
   DealStageChangeCommand,
   DealUpdateCommand,
+  InboundQuizLeadCommand,
   NoteCommand,
 } from './ports'
 
@@ -36,6 +38,7 @@ type RecordedCalls = {
   updateDeal: DealUpdateCommand[]
   changeStage: DealStageChangeCommand[]
   addNote: NoteCommand[]
+  recordInboundQuizLead: InboundQuizLeadCommand[]
   lookupClientByPhone: Array<{ phoneNormalized: string; now: Date }>
   listDeals: Array<{ now: Date }>
   listBoard: Array<{ now: Date }>
@@ -47,6 +50,7 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
     updateDeal: [],
     changeStage: [],
     addNote: [],
+    recordInboundQuizLead: [],
     lookupClientByPhone: [],
     listDeals: [],
     listBoard: [],
@@ -84,6 +88,14 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
     lookupClientByPhone: async (phoneNormalized, at) => {
       calls.lookupClientByPhone.push({ phoneNormalized, now: at })
       return { client: null, openDeal: null } as ClientLookupResponse
+    },
+    recordInboundQuizLead: async (command) => {
+      calls.recordInboundQuizLead.push(command)
+      return {
+        status: 'created',
+        clientId: '00000000-0000-7000-8000-0000000000c1',
+        dealId: '00000000-0000-7000-8000-0000000000d1',
+      }
     },
     ...overrides,
   }
@@ -127,6 +139,41 @@ describe('phone identity', () => {
       service.createDeal({ name: 'Олександр', phone: '123', source: 'teraso.com.ua' }, actor),
     ).rejects.toThrow('Укажите корректный номер телефона')
     expect(calls.createDeal).toHaveLength(0)
+  })
+})
+
+describe('inbound quiz lead', () => {
+  const lead: InboundQuizLeadInput = {
+    externalId: 'lead_1',
+    receivedAt: '2026-07-23T08:30:00.000Z',
+    name: 'Олександр',
+    phone: '+38 (093) 533-53-53',
+    source: 'teraso.com.ua',
+    form: 'Квіз',
+    landingUrl: 'https://teraso.com.ua/kviz',
+  }
+
+  test('normalizes the phone and passes the arrival time and clock distinctly', async () => {
+    const { calls, service } = createService()
+
+    const result = await service.recordInboundQuizLead(lead)
+
+    const command = calls.recordInboundQuizLead[0]
+    expect(command?.phoneNormalized).toBe('+380935335353')
+    // `receivedAt` is the payload's arrival time; `now` is the injected clock. The
+    // service must keep them separate so the auto-task can anchor on the former.
+    expect(command?.receivedAt.toISOString()).toBe('2026-07-23T08:30:00.000Z')
+    expect(command?.now).toBe(now)
+    expect(result.status).toBe('created')
+  })
+
+  test('rejects an unusable phone before persistence, like every other write', async () => {
+    const { calls, service } = createService()
+
+    await expect(service.recordInboundQuizLead({ ...lead, phone: '123' })).rejects.toThrow(
+      'Укажите корректный номер телефона',
+    )
+    expect(calls.recordInboundQuizLead).toHaveLength(0)
   })
 })
 

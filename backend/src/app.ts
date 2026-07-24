@@ -5,7 +5,11 @@ import { secureHeaders } from 'hono/secure-headers'
 import { createBackgroundTasks, type TaskDeferrer } from './background-tasks'
 import type { DbClient } from './db'
 import { disabledEmailDelivery, type EmailDelivery } from './email/service'
-import type { AppEnv } from './env'
+import {
+  WEBHOOK_BODY_LIMIT_BYTES_DEFAULT,
+  WEBHOOK_MAX_AGE_SECONDS_DEFAULT,
+  type AppEnv,
+} from './env'
 import { errorResponse, handleError, validationErrorHook } from './http/errors'
 import { createAuthSecurity } from './http/security'
 import { createAuthModule, type AuthHttpEnv } from './modules/auth'
@@ -31,7 +35,17 @@ export function createApp({
     requireAdmin: auth.requireAdmin,
     requireAuth: auth.requireAuth,
   })
-  const crm = createCrmModule({ db: prisma, requireAuth: auth.requireAuth })
+  const crm = createCrmModule({
+    db: prisma,
+    requireAuth: auth.requireAuth,
+    // The signing secret is server-only (PRD 10); the two limits fall back to their
+    // documented defaults when the optional env vars are unset.
+    webhook: {
+      secret: env.TERASO_WEBHOOK_SECRET,
+      maxAgeSeconds: env.TERASO_WEBHOOK_MAX_AGE_SECONDS ?? WEBHOOK_MAX_AGE_SECONDS_DEFAULT,
+      bodyLimitBytes: env.TERASO_WEBHOOK_BODY_LIMIT_BYTES ?? WEBHOOK_BODY_LIMIT_BYTES_DEFAULT,
+    },
+  })
   const app = new OpenAPIHono<AuthHttpEnv>({
     defaultHook: validationErrorHook,
   })
@@ -115,6 +129,12 @@ export function createApp({
   app.route('/api/auth', auth.routes)
   app.route('/api/users', users.userRoutes)
   app.route('/api/admin', users.adminRoutes)
+  // The HMAC-signed site webhook, mounted as a sibling BEFORE the authenticated CRM
+  // router and outside the auth security glob above: it authenticates by signature,
+  // not a bearer token, so it must not inherit `requireAuth`, the auth rate-limiter
+  // or the auth body limit. `crm.routes` defines no `/inbound/*` path, so the two
+  // never collide.
+  app.route('/api/crm/inbound', crm.inboundRoutes)
   app.route('/api/crm', crm.routes)
 
   app.doc('/openapi.json', {

@@ -204,19 +204,23 @@ describe('CRM route registration', () => {
   })
 
   /**
-   * The auth guard is scoped to /deals and /clients, not a /api/crm/* catch-all,
-   * so Task 5's HMAC-signed inbound webhook can mount unauthenticated under
-   * /api/crm/inbound. This pins the seam: an unauthenticated request to that
-   * still-absent path is a 404 (no route yet), never a 401 (guard shadowing it).
+   * The auth guard is scoped to /deals, /tasks and /clients, not a /api/crm/*
+   * catch-all, so Task 5's HMAC-signed inbound webhook mounts unauthenticated under
+   * /api/crm/inbound. This pins the seam now that the webhook exists: an unsigned
+   * delivery is refused by the webhook's OWN signature check — 401 with the
+   * signature message — never by requireAuth. A bearer guard shadowing the route
+   * would answer 401 with a different message; an unmounted route would answer 404.
+   * The signature check runs even without a configured secret (it fails closed), so
+   * this holds regardless of the test env.
    */
-  test('leaves /api/crm/inbound unguarded for the future webhook', async () => {
+  test('mounts the inbound webhook outside the auth guard, refused only by its signature check', async () => {
     const response = await app.request('/api/crm/inbound/quiz', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
     })
 
-    expect(response.status).toBe(404)
-    expect((await response.json()).error.code).toBe('NOT_FOUND')
+    expect(response.status).toBe(401)
+    expect((await response.json()).error.message).toBe('Недействительная подпись вебхука')
   })
 })

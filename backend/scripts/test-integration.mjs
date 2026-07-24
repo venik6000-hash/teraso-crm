@@ -76,6 +76,7 @@ run(
     'src/modules/auth/auth.integration.test.ts',
     'src/modules/users/users.integration.test.ts',
     'src/modules/crm/crm.integration.test.ts',
+    'src/modules/crm/transport/inbound-routes.test.ts',
   ],
   { env },
 )

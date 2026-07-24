@@ -12,6 +12,8 @@ import type {
   DealStageChangeInput,
   DealTaskDto,
   DealUpdateInput,
+  InboundQuizLeadInput,
+  InboundQuizLeadResult,
   TaskCreateInput,
   TaskUpdateInput,
 } from '@teraso-crm/contracts'
@@ -39,6 +41,7 @@ export type CrmRepository = {
   listCriticalTasks(now: Date): Promise<CriticalTasksResponse>
   findClient(clientId: string, now: Date): Promise<ClientDetailDto | null>
   lookupClientByPhone(phoneNormalized: string, now: Date): Promise<ClientLookupResponse>
+  recordInboundQuizLead(command: InboundQuizLeadCommand): Promise<InboundQuizLeadResult>
 }
 
 /**
@@ -90,6 +93,21 @@ export type TaskUpdateCommand = {
   taskId: string
   input: TaskUpdateInput
   actorUserId: string
+  now: Date
+}
+
+/**
+ * A signed, schema-valid quiz delivery ready to persist. `phoneNormalized` is
+ * resolved by the domain before the command is built, so persistence never sees a
+ * raw human-typed number. `receivedAt` is the lead's own arrival instant (the
+ * deal's `submittedAt` and the anchor for the auto-task at receivedAt + grace),
+ * kept distinct from `now`, which is the server clock used for history rows and
+ * the deal's `createdAt`-based grace window.
+ */
+export type InboundQuizLeadCommand = {
+  input: InboundQuizLeadInput
+  phoneNormalized: string
+  receivedAt: Date
   now: Date
 }
 

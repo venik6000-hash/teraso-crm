@@ -2,6 +2,7 @@ import {
   ACTIVE_DEAL_STAGES,
   CLIENT_DETAIL_DEAL_LIMIT,
   DEALS_MAX_PAGE,
+  NEXT_STEP_GRACE_MINUTES,
   OPEN_DEAL_STAGES,
   type ActivityFieldChange,
   type ClientDetailDto,
@@ -14,6 +15,8 @@ import {
   type DealStage,
   type DealSummaryDto,
   type DealTaskDto,
+  type InboundQuizLeadInput,
+  type InboundQuizLeadResult,
   type TaskCreateInput,
 } from '@teraso-crm/contracts'
 
@@ -24,6 +27,7 @@ import type {
   DealCreateCommand,
   DealStageChangeCommand,
   DealUpdateCommand,
+  InboundQuizLeadCommand,
   TaskCreateCommand,
   TaskUpdateCommand,
 } from '../application/ports'
@@ -294,6 +298,10 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
         openDeal: openDeals[0] ?? null,
       } satisfies ClientLookupResponse
     },
+
+    recordInboundQuizLead(command) {
+      return recordInboundQuizLeadTransaction(db, command)
+    },
   }
 }
 
@@ -350,6 +358,28 @@ function lockDeal(tx: Pick<TransactionClient, '$executeRaw'>, dealId: string) {
 function lockTask(tx: Pick<TransactionClient, '$executeRaw'>, taskId: string) {
   return tx.$executeRaw(
     Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`crm-task:${taskId}`}, 0))`,
+  )
+}
+
+/**
+ * The idempotency-identity advisory lock for one inbound delivery, held for the
+ * transaction. Retried and concurrent deliveries of ONE lead are the site's normal
+ * behaviour, so this is taken as the FIRST statement of the inbound transaction —
+ * before the receipt check — to serialize deliveries sharing a `[source,
+ * externalId]`: the second blocks until the first commits, then reads the committed
+ * receipt and returns the original deal rather than creating a duplicate. The
+ * unique index on IngestionReceipt is the correctness backstop if two ever slip
+ * through. It intentionally does NOT cover the client-phone race between two
+ * different externalIds for one phone — those hold different keys — which the
+ * client unique index plus the transaction retry handle instead.
+ */
+function lockInboundLead(
+  tx: Pick<TransactionClient, '$executeRaw'>,
+  source: string,
+  externalId: string,
+) {
+  return tx.$executeRaw(
+    Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`inbound:${source}:${externalId}`}, 0))`,
   )
 }
 
@@ -432,30 +462,41 @@ async function insertTaskWithinTx(
   return created
 }
 
+/**
+ * Resolves the client owning `phoneNormalized`, creating one when none exists, and
+ * — only when the stored name is blank — fills it from this submission. The owner's
+ * hand-typed correction must survive a later lead that carries the careless name a
+ * customer typed into the quiz (PRD 5); an explicit PATCH is the deliberate edit
+ * that does overwrite (see applyDealUpdate). The manual create path and the inbound
+ * webhook compose this single resolver so the client-identity rule has one home
+ * rather than a second copy the two could drift apart on.
+ */
+async function resolveClientWithinTx(
+  tx: TransactionClient,
+  params: { name: string; phoneNormalized: string },
+): Promise<{ id: string; wasCreated: boolean }> {
+  const existing = await tx.client.findUnique({
+    where: { phoneNormalized: params.phoneNormalized },
+    select: { id: true, name: true },
+  })
+  if (!existing) {
+    const created = await tx.client.create({
+      data: { name: params.name, phoneNormalized: params.phoneNormalized },
+      select: { id: true },
+    })
+    return { id: created.id, wasCreated: true }
+  }
+
+  if (existing.name.trim() === '' && params.name.trim() !== '') {
+    await tx.client.update({ where: { id: existing.id }, data: { name: params.name } })
+  }
+  return { id: existing.id, wasCreated: false }
+}
+
 async function insertDeal(tx: TransactionClient, command: DealCreateCommand): Promise<string> {
   const { input, phoneNormalized, actorUserId, now } = command
 
-  const existing = await tx.client.findUnique({
-    where: { phoneNormalized },
-    select: { id: true, name: true },
-  })
-  const client =
-    existing ??
-    (await tx.client.create({
-      data: { name: input.name, phoneNormalized },
-      select: { id: true, name: true },
-    }))
-
-  /**
-   * A repeat submission fills the stored name only when it is blank. The owner
-   * may have corrected a client's name by hand, and a later lead carrying the
-   * name the customer typed into the quiz must not overwrite that correction.
-   * An explicit PATCH is the deliberate edit and does overwrite; see
-   * applyDealUpdate.
-   */
-  if (existing && existing.name.trim() === '' && input.name.trim() !== '') {
-    await tx.client.update({ where: { id: client.id }, data: { name: input.name } })
-  }
+  const client = await resolveClientWithinTx(tx, { name: input.name, phoneNormalized })
 
   const deal = await tx.deal.create({
     data: {
@@ -827,6 +868,161 @@ async function applyTaskUpdate(db: DbClient, command: TaskUpdateCommand): Promis
   } catch (error) {
     throw translateWriteError(error)
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Inbound quiz ingestion (PRD 6.1, PRD 8)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Records one signed, schema-valid quiz delivery idempotently in a single
+ * transaction. The transport layer has already authenticated the site by HMAC.
+ *
+ * Order: take the idempotency-identity advisory lock; check the `[source,
+ * externalId]` receipt and short-circuit a redelivery to its original deal writing
+ * nothing; resolve the client by normalized phone; then either attach an
+ * INBOUND_LEAD_RECEIVED event to the client's open deal, or create a fresh deal
+ * with its attribution and the ACTIVE "Первично обработать заявку" auto-task due at
+ * receivedAt + grace; finally write the receipt that makes the NEXT delivery
+ * idempotent. Every non-duplicate path writes a receipt; only the newly-created-deal
+ * paths write attribution and an auto-task, so a repeat lead on an open deal never
+ * overwrites the first submission's attribution nor adds a second follow-up path.
+ *
+ * The advisory lock serializes deliveries sharing one `[source, externalId]`. Two
+ * DIFFERENT externalIds for the SAME new phone are not serialized (different keys),
+ * so one can still lose the client unique race; the whole transaction is retried
+ * once exactly like createDeal, and the retry finds the winner's client instead of
+ * surfacing a 500.
+ */
+async function recordInboundQuizLeadTransaction(
+  db: DbClient,
+  command: InboundQuizLeadCommand,
+): Promise<InboundQuizLeadResult> {
+  const { input, phoneNormalized, receivedAt, now } = command
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await db.$transaction(async (tx) => {
+        await lockInboundLead(tx, input.source, input.externalId)
+
+        const existingReceipt = await tx.ingestionReceipt.findUnique({
+          where: { source_externalId: { source: input.source, externalId: input.externalId } },
+          select: { dealId: true, deal: { select: { clientId: true } } },
+        })
+        if (existingReceipt) {
+          return {
+            status: 'duplicate-delivery',
+            clientId: existingReceipt.deal.clientId,
+            dealId: existingReceipt.dealId,
+          }
+        }
+
+        const client = await resolveClientWithinTx(tx, { name: input.name, phoneNormalized })
+
+        // A just-created client cannot have an open deal, so the lookup is skipped.
+        const openDeal = client.wasCreated
+          ? null
+          : await tx.deal.findFirst({
+              where: { clientId: client.id, stage: { in: [...OPEN_DEAL_STAGES] } },
+              orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
+              select: { id: true },
+            })
+
+        // The «Заявка получена» event carries the delivery's own source and external
+        // id for the timeline; both are display context, not the click identifiers.
+        const inboundMetadata: DealActivityMetadata = {
+          source: input.source,
+          externalId: input.externalId,
+        }
+
+        if (openDeal) {
+          await appendActivity(tx, {
+            dealId: openDeal.id,
+            kind: 'INBOUND_LEAD_RECEIVED',
+            authorUserId: null,
+            now,
+            metadata: inboundMetadata,
+          })
+          await writeInboundReceipt(tx, input, openDeal.id, receivedAt)
+          return { status: 'attached-to-open-deal', clientId: client.id, dealId: openDeal.id }
+        }
+
+        const deal = await tx.deal.create({
+          data: {
+            clientId: client.id,
+            source: input.source,
+            form: input.form,
+            landingUrl: input.landingUrl,
+            // The arrival time, not the row's creation time. The auto-task anchors on
+            // this; the no-next-step grace window anchors on the default createdAt
+            // (now), so a backdated lead does not skip its grace but its auto-task is
+            // already overdue.
+            submittedAt: receivedAt,
+            material: input.material ?? null,
+            areaLabel: input.areaLabel ?? null,
+            budgetLabel: input.budgetLabel ?? null,
+            needTiming: input.needTiming ?? null,
+            preferredChannel: input.preferredChannel ?? null,
+          },
+          select: { id: true },
+        })
+
+        // The system creation event (author null) is the deal's first history row,
+        // which the Restrict FK then relies on to forbid silent deletion.
+        await appendActivity(tx, {
+          dealId: deal.id,
+          kind: 'INBOUND_LEAD_RECEIVED',
+          authorUserId: null,
+          now,
+          metadata: inboundMetadata,
+        })
+
+        if (input.attribution) {
+          await tx.leadAttribution.create({ data: { dealId: deal.id, ...input.attribution } })
+        }
+
+        await insertTaskWithinTx(tx, {
+          dealId: deal.id,
+          task: {
+            kind: 'CALL',
+            title: 'Первично обработать заявку',
+            dueAt: new Date(receivedAt.getTime() + NEXT_STEP_GRACE_MINUTES * 60_000).toISOString(),
+          },
+          actorUserId: null,
+          now,
+          fallbackAssigneeUserId: null,
+        })
+
+        await writeInboundReceipt(tx, input, deal.id, receivedAt)
+
+        return {
+          status: client.wasCreated ? 'created' : 'new-deal-for-existing-client',
+          clientId: client.id,
+          dealId: deal.id,
+        }
+      })
+    } catch (error) {
+      if (attempt === 0 && isClientPhoneConflict(error)) continue
+      throw translateWriteError(error)
+    }
+  }
+}
+
+/**
+ * Writes the proof-of-delivery receipt. `source` is the delivery's immutable
+ * integration identity, captured verbatim from the payload — never Deal.source,
+ * which is an editable marketing label. Coupling them would let a relabelled deal
+ * change the idempotency key and admit a duplicate on redelivery.
+ */
+function writeInboundReceipt(
+  tx: TransactionClient,
+  input: InboundQuizLeadInput,
+  dealId: string,
+  receivedAt: Date,
+) {
+  return tx.ingestionReceipt.create({
+    data: { source: input.source, externalId: input.externalId, dealId, receivedAt },
+  })
 }
 
 /* ------------------------------------------------------------------ *

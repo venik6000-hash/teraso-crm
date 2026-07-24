@@ -11,6 +11,8 @@ import type {
   DealListQuery,
   DealStageChangeInput,
   DealUpdateInput,
+  InboundQuizLeadInput,
+  InboundQuizLeadResult,
   NoteCreateInput,
 } from '@teraso-crm/contracts'
 
@@ -137,6 +139,28 @@ export class CrmService {
       normalizeUaPhone(query.phone),
       this.now(),
     )
+  }
+
+  /**
+   * Ingests one signed, schema-valid quiz delivery (PRD 6.1). The transport layer
+   * has already verified the HMAC signature and freshness; this method resolves the
+   * client's phone identity — throwing a validation failure for a number that
+   * cannot identify a Ukrainian client — and hands a single transactional command
+   * to the repository, which serializes on the `[source, externalId]` idempotency
+   * identity so retried or concurrent deliveries of one lead cannot create a second
+   * deal. It returns identifiers and a status only; the raw UTM and click
+   * identifiers are persisted as attribution and never echoed (contract note).
+   *
+   * There is no `actor`: the site is not a CRM user, so inbound history is authored
+   * by the system (null author), unlike every bearer-authenticated method above.
+   */
+  async recordInboundQuizLead(input: InboundQuizLeadInput): Promise<InboundQuizLeadResult> {
+    return this.dependencies.repository.recordInboundQuizLead({
+      input,
+      phoneNormalized: normalizeUaPhone(input.phone),
+      receivedAt: new Date(input.receivedAt),
+      now: this.now(),
+    })
   }
 
   private now(): Date {

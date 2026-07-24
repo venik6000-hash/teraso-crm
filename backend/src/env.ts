@@ -7,6 +7,15 @@ const booleanStringSchema = z
 
 const knownWeakJwtSecrets = new Set(['replace-with-at-least-32-random-characters'])
 
+/**
+ * Defaults for the optional Teraso webhook limits, applied where the config is
+ * consumed (app.ts) rather than in the schema, so adding these tunables does not
+ * force every hand-built AppEnv test literal to restate them. Five minutes matches
+ * PRD 8's replay window; 64KB matches the auth body limit.
+ */
+export const WEBHOOK_MAX_AGE_SECONDS_DEFAULT = 300
+export const WEBHOOK_BODY_LIMIT_BYTES_DEFAULT = 64 * 1024
+
 const optionalStringSchema = z.preprocess((value) => {
   if (typeof value !== 'string') return value
   const trimmed = value.trim()
@@ -55,6 +64,15 @@ const envSchema = z.object({
   AUTH_BODY_LIMIT_BYTES: z.coerce.number().int().positive().max(1024 * 1024).default(64 * 1024),
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
   AUTH_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+  // Teraso site webhook (Task 5, PRD 8 and 10). The signing secret is server-only:
+  // when it is unset the inbound route fail-closes and rejects every delivery with
+  // 401. The two limits are optional and fall back to their documented defaults
+  // (WEBHOOK_MAX_AGE_SECONDS_DEFAULT / WEBHOOK_BODY_LIMIT_BYTES_DEFAULT) at the point
+  // of use in app.ts, so the many hand-built test AppEnv literals need not restate
+  // them. The max age is bounded to keep a stale-signature replay window small.
+  TERASO_WEBHOOK_SECRET: optionalStringSchema,
+  TERASO_WEBHOOK_MAX_AGE_SECONDS: z.coerce.number().int().positive().max(3600).optional(),
+  TERASO_WEBHOOK_BODY_LIMIT_BYTES: z.coerce.number().int().positive().max(1024 * 1024).optional(),
   SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().positive().max(60).default(20),
   TRUST_PROXY: booleanStringSchema,
   TRUSTED_PROXY_CLIENT_IP_HEADER: optionalHttpHeaderNameSchema,
