@@ -182,6 +182,11 @@ model DealTask {
 /// the enum, indexed for the period scan, or trusted to have been written.
 /// metadata keeps the genuinely free-form part, such as field before/after values.
 ///
+/// Reopening a WON or LOST deal writes a REOPENED row ONLY, never a REOPENED
+/// plus a STAGE_CHANGED. A reopen is an administrative correction, not a sales
+/// transition, so LOST -> NEW must not be counted as a funnel conversion;
+/// counting it would inflate the rate every time the owner fixes a mistake.
+///
 /// onDelete is Restrict, not Cascade: PRD 10 states the event log is never
 /// rewritten after the fact, so deleting a deal must fail loudly rather than
 /// silently erase its history.

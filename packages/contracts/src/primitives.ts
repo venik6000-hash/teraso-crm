@@ -86,8 +86,13 @@ export const filterFlagSchema = z
 export const pageNumberSchema = (defaultValue: number, maximum?: number) =>
   z.coerce.number().int().positive().max(maximum ?? Number.MAX_SAFE_INTEGER).default(defaultValue)
 
-/** Optional free text from a query string; a blank value means "no filter". */
-export const optionalQueryText = (maximum: number) =>
+/**
+ * Optional trimmed free text where blank means absent. Used both for query
+ * filters, where an empty `?source=` means "no filter", and for POST body
+ * fields, where an untouched form input arrives as "" and must not be stored as
+ * an empty string.
+ */
+export const optionalText = (maximum: number) =>
   z.preprocess(
     (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
     z.string().trim().max(maximum).optional(),

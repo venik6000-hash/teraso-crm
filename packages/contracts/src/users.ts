@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { emailSchema, userRoleSchema, userSchema } from './auth'
-import { optionalQueryText, pageNumberSchema, pageResponse } from './primitives'
+import { optionalText, pageNumberSchema, pageResponse } from './primitives'
 
 export const updateProfileRequestSchema = z
   .object({
@@ -20,7 +20,7 @@ export const ADMIN_USERS_MAX_PAGE_SIZE = 100
 
 export const adminUsersQuerySchema = z
   .object({
-    q: optionalQueryText(100),
+    q: optionalText(100),
     page: pageNumberSchema(1, ADMIN_USERS_MAX_PAGE),
     pageSize: pageNumberSchema(20, ADMIN_USERS_MAX_PAGE_SIZE),
   })

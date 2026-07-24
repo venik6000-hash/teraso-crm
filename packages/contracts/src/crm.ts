@@ -6,7 +6,7 @@ import {
   isoInstantSchema,
   moneyAmountSchema,
   moneyResponseSchema,
-  optionalQueryText,
+  optionalText,
   pageNumberSchema,
   pageResponse,
 } from './primitives'
@@ -154,12 +154,12 @@ export const DEALS_MAX_PAGE_SIZE = 100
  * than "only deals that fail this condition".
  */
 const dealFilterBase = z.object({
-  q: optionalQueryText(100),
+  q: optionalText(100),
   stage: dealStageSchema.optional(),
   leadClass: leadClassSchema.optional(),
-  source: optionalQueryText(80),
+  source: optionalText(80),
   material: materialSchema.optional(),
-  needTiming: optionalQueryText(120),
+  needTiming: optionalText(120),
   responsibleUserId: z.uuid().optional(),
   submittedFrom: isoDateSchema.optional(),
   submittedTo: isoDateSchema.optional(),
@@ -221,16 +221,16 @@ export const dealCreateSchema = z
     name: nameSchema,
     phone: phoneSchema,
     source: sourceSchema,
-    form: optionalQueryText(80),
+    form: optionalText(80),
     landingUrl: z.url().max(2000).optional(),
     submittedAt: isoInstantSchema.optional(),
     leadClass: leadClassSchema.optional(),
     responsibleUserId: z.uuid().optional(),
     material: materialSchema.optional(),
-    areaLabel: optionalQueryText(80),
-    budgetLabel: optionalQueryText(80),
-    objectType: optionalQueryText(120),
-    needTiming: optionalQueryText(120),
+    areaLabel: optionalText(80),
+    budgetLabel: optionalText(80),
+    objectType: optionalText(120),
+    needTiming: optionalText(120),
     preferredChannel: preferredChannelSchema.optional(),
     potentialAmount: moneyAmountSchema.optional(),
     currentNote: currentNoteSchema.optional(),
@@ -469,7 +469,15 @@ export const dealActivitySchema = z
     dealId: z.uuid(),
     kind: dealActivityKindSchema,
     text: z.string().nullable(),
-    /** Populated together on STAGE_CHANGED and REOPENED; null on every other kind. */
+    /**
+     * Populated together on STAGE_CHANGED and REOPENED; null on every other kind.
+     *
+     * Reopening a WON or LOST deal emits a REOPENED activity ONLY — never a
+     * REOPENED plus a STAGE_CHANGED. The dashboard funnel counts STAGE_CHANGED
+     * rows, and a reopen is an administrative correction rather than a sales
+     * transition, so `LOST -> NEW` must not register as a conversion: counting it
+     * would inflate the conversion rate every time the owner fixes a mistake.
+     */
     fromStage: dealStageSchema.nullable(),
     toStage: dealStageSchema.nullable(),
     authorUserId: z.uuid().nullable(),
@@ -527,9 +535,11 @@ export const leadAttributionSchema = z
   .strict()
 
 /**
- * Embedded history is capped at the most recent N entries so the response stays
- * bounded and, more importantly, so paging can be added later without a breaking
- * shape change across two runtimes. `hasMoreActivities` is that escape hatch.
+ * Embedded tasks and history are capped at the most recent N entries so the
+ * response stays bounded and, more importantly, so paging can be added later
+ * without a breaking shape change across two runtimes. `hasMoreTasks` and
+ * `hasMoreActivities` are that escape hatch: both are required, so a producer
+ * that truncates a collection cannot omit saying so.
  */
 export const dealDetailSchema = z
   .object({
@@ -549,6 +559,7 @@ export const dealDetailSchema = z
     updatedAt: isoInstantSchema,
     tasks: z.array(dealTaskSchema).max(DEAL_DETAIL_TASK_LIMIT),
     activities: z.array(dealActivitySchema).max(DEAL_DETAIL_ACTIVITY_LIMIT),
+    hasMoreTasks: z.boolean(),
     hasMoreActivities: z.boolean(),
     attribution: leadAttributionSchema.nullable(),
   })

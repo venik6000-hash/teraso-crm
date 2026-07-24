@@ -114,6 +114,7 @@ const detail: DealDetailDto = {
   updatedAt: '2026-07-23T09:10:00.000Z',
   tasks: [task],
   activities: [activity],
+  hasMoreTasks: false,
   hasMoreActivities: false,
   attribution: null,
 }
@@ -503,16 +504,22 @@ describe('response DTOs', () => {
   test('require the fields the UI renders urgency and history from', () => {
     const { isCritical, ...withoutCritical } = summary
     expect(() => dealSummarySchema.parse(withoutCritical)).toThrow()
-    const { hasMoreActivities, ...withoutFlag } = detail
-    expect(() => dealDetailSchema.parse(withoutFlag)).toThrow()
+    // Both truncation flags are required, so a producer that caps a collection
+    // cannot silently omit telling the UI that it did.
+    const { hasMoreActivities, ...withoutActivityFlag } = detail
+    expect(() => dealDetailSchema.parse(withoutActivityFlag)).toThrow()
+    const { hasMoreTasks, ...withoutTaskFlag } = detail
+    expect(() => dealDetailSchema.parse(withoutTaskFlag)).toThrow()
     expect(dealSummarySchema.parse({ ...summary, nearestActiveTask: null })).toMatchObject({
       nearestActiveTask: null,
     })
   })
 
-  test('cap embedded history so paging can be added without a breaking change', () => {
-    const many = Array.from({ length: 51 }, () => activity)
-    expect(() => dealDetailSchema.parse({ ...detail, activities: many })).toThrow()
+  test('cap embedded tasks and history so paging can be added without a breaking change', () => {
+    const manyActivities = Array.from({ length: 51 }, () => activity)
+    expect(() => dealDetailSchema.parse({ ...detail, activities: manyActivities })).toThrow()
+    const manyTasks = Array.from({ length: 51 }, () => task)
+    expect(() => dealDetailSchema.parse({ ...detail, tasks: manyTasks })).toThrow()
   })
 })
 
