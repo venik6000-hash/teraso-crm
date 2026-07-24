@@ -133,11 +133,20 @@ type CreateCrmRoutesOptions = {
 export function createCrmRoutes({ requireAuth, service }: CreateCrmRoutesOptions) {
   const routes = new OpenAPIHono<AuthHttpEnv>({ defaultHook: validationErrorHook })
 
-  // PRD 10: access is enforced at the API, not only in the interface.
-  routes.use('*', requireAuth)
+  /**
+   * PRD 10: access is enforced at the API, not only in the interface. The guard
+   * is scoped to the concrete authenticated subpaths rather than a `'*'`
+   * catch-all on purpose: a catch-all on this router, mounted at `/api/crm`,
+   * would shadow Task 5's unauthenticated `/api/crm/inbound/quiz` webhook and
+   * answer 401 for it depending on mount order. Scoped guards leave the router
+   * with no route for `/inbound/*`, so a sibling webhook router mounts cleanly.
+   */
+  routes.use('/deals', requireAuth)
+  routes.use('/deals/*', requireAuth)
+  routes.use('/clients/*', requireAuth)
 
   routes.openapi(listDealsRoute, async (c) => {
-    return c.json(await service.listDeals(c.req.valid('query'), c.var.user), 200)
+    return c.json(await executeCrm(() => service.listDeals(c.req.valid('query'), c.var.user)), 200)
   })
 
   routes.openapi(createDealRoute, async (c) => {

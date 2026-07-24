@@ -147,4 +147,21 @@ describe('CRM route registration', () => {
 
     expect(response.status).toBe(413)
   })
+
+  /**
+   * The auth guard is scoped to /deals and /clients, not a /api/crm/* catch-all,
+   * so Task 5's HMAC-signed inbound webhook can mount unauthenticated under
+   * /api/crm/inbound. This pins the seam: an unauthenticated request to that
+   * still-absent path is a 404 (no route yet), never a 401 (guard shadowing it).
+   */
+  test('leaves /api/crm/inbound unguarded for the future webhook', async () => {
+    const response = await app.request('/api/crm/inbound/quiz', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+
+    expect(response.status).toBe(404)
+    expect((await response.json()).error.code).toBe('NOT_FOUND')
+  })
 })

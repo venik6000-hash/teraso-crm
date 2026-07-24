@@ -65,6 +65,14 @@ export const NEXT_STEP_GRACE_MINUTES = 30
 export const DEAL_DETAIL_ACTIVITY_LIMIT = 50
 export const DEAL_DETAIL_TASK_LIMIT = 50
 
+/**
+ * Most recent deals embedded in a client detail response. Capped for the same
+ * reason as the deal-detail collections: a long-standing contractor accumulates
+ * many deals, so the response stays bounded and `hasMoreDeals` leaves room to
+ * add paging later without a breaking shape change. See clientDetailSchema.
+ */
+export const CLIENT_DETAIL_DEAL_LIMIT = 50
+
 /* ------------------------------------------------------------------ *
  * Local text helpers
  * ------------------------------------------------------------------ */
@@ -593,7 +601,14 @@ export const clientDetailSchema = z
     phoneNormalized: z.string(),
     createdAt: isoInstantSchema,
     updatedAt: isoInstantSchema,
-    deals: z.array(dealSummarySchema),
+    /**
+     * The client's most recent deals, newest first, capped at
+     * CLIENT_DETAIL_DEAL_LIMIT. `hasMoreDeals` is the required escape hatch — a
+     * producer that truncates the list cannot omit saying so — mirroring
+     * `hasMoreTasks`/`hasMoreActivities` on dealDetailSchema.
+     */
+    deals: z.array(dealSummarySchema).max(CLIENT_DETAIL_DEAL_LIMIT),
+    hasMoreDeals: z.boolean(),
   })
   .strict()
 

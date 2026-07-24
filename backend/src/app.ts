@@ -75,7 +75,12 @@ export function createApp({
   })) {
     app.use('/api/users/*', middleware)
     app.use('/api/admin/*', middleware)
-    app.use('/api/crm/*', middleware)
+    // Scoped to the authenticated CRM surface, not a blanket /api/crm/* glob, so
+    // Task 5's HMAC-signed webhook can mount under /api/crm/inbound without
+    // inheriting bearer-auth rate limiting or the auth body limit.
+    app.use('/api/crm/deals', middleware)
+    app.use('/api/crm/deals/*', middleware)
+    app.use('/api/crm/clients/*', middleware)
   }
   app.get('/', (c) => {
     return c.json({
@@ -108,7 +113,7 @@ export function createApp({
   app.route('/api/auth', auth.routes)
   app.route('/api/users', users.userRoutes)
   app.route('/api/admin', users.adminRoutes)
-  app.route('/api/crm', crm)
+  app.route('/api/crm', crm.routes)
 
   app.doc('/openapi.json', {
     openapi: '3.0.0',

@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import {
+  CLIENT_DETAIL_DEAL_LIMIT,
   clientDetailResponseSchema,
   clientLookupResponseSchema,
   dealActivityResponseSchema,
@@ -94,6 +95,41 @@ maybeDescribe('CRM clients, deals and history integration', () => {
       expect(client.deals.map((deal) => deal.id).sort()).toEqual([first.id, second.id].sort())
     })
 
+    /**
+     * PRD 6.1 rests on one client per phone. Two quiz submissions can race — the
+     * site retries on timeout, and the webhook of Task 5 makes concurrent
+     * deliveries for one phone expected rather than rare — so the unique index is
+     * the guarantee and the loser of the race must retry and find the winner's
+     * client, not surface a 500.
+     */
+    test('collapses concurrent same-phone creates onto one client without a 500', async () => {
+      /**
+       * Force the pg pool to open several connections first. Without this the
+       * pool serializes the requests on a cold start and the race never happens,
+       * which would let this guard flap green over a broken retry.
+       */
+      await Promise.all(Array.from({ length: 8 }, () => prisma.$queryRaw`SELECT 1`))
+
+      const responses = await Promise.all(
+        Array.from({ length: 5 }, (_, index) =>
+          app.request('/api/crm/deals', {
+            method: 'POST',
+            headers: jsonHeaders(ownerToken),
+            body: JSON.stringify({
+              name: `Заявка ${index}`,
+              phone: '+380935335353',
+              source: 'teraso.com.ua',
+            }),
+          }),
+        ),
+      )
+
+      const statuses = responses.map((response) => response.status).sort()
+      expect(statuses).toEqual([201, 201, 201, 201, 201])
+      expect(await prisma.client.count()).toBe(1)
+      expect(await prisma.deal.count()).toBe(5)
+    })
+
     test('answers the duplicate-phone warning with the client and its open deal', async () => {
       const deal = await createDeal({
         name: 'Олександр',
@@ -132,6 +168,33 @@ maybeDescribe('CRM clients, deals and history integration', () => {
       expect(response.status).toBe(400)
       expect((await response.json()).error.message).toBe('Укажите корректный номер телефона')
       expect(await prisma.client.count()).toBe(0)
+    })
+
+    test('caps the deals on a client detail and reports hasMoreDeals', async () => {
+      const single = await createDeal({
+        name: 'Один',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      expect((await getClient(single.client.id)).hasMoreDeals).toBe(false)
+
+      const busy = await createDeal({
+        name: 'Подрядчик',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      // One extra beyond the cap, so truncation must be reported.
+      await prisma.deal.createMany({
+        data: Array.from({ length: CLIENT_DETAIL_DEAL_LIMIT }, (_, index) => ({
+          clientId: busy.client.id,
+          source: 'массовая',
+          submittedAt: new Date(Date.UTC(2026, 0, 1 + index, 9)),
+        })),
+      })
+
+      const detail = await getClient(busy.client.id)
+      expect(detail.deals).toHaveLength(CLIENT_DETAIL_DEAL_LIMIT)
+      expect(detail.hasMoreDeals).toBe(true)
     })
   })
 
@@ -339,6 +402,63 @@ maybeDescribe('CRM clients, deals and history integration', () => {
         expect(`${path} -> ${response.status}`).toBe(`${path} -> 404`)
       }
     })
+
+    /**
+     * A responsible-user or assignee id that no longer exists is an ordinary
+     * stale value from the form's picker, not an attack — the FK failure must
+     * become a 400 with a Russian message, not an English 500, and must leave
+     * nothing behind.
+     */
+    test('answers 400 for an unknown responsible or assignee user', async () => {
+      const ghost = '01912d4e-8888-7000-8000-000000000008'
+      const dueAt = new Date(Date.now() + 3_600_000).toISOString()
+
+      const badResponsible = await app.request('/api/crm/deals', {
+        method: 'POST',
+        headers: jsonHeaders(ownerToken),
+        body: JSON.stringify({
+          name: 'Олександр',
+          phone: '+380935335353',
+          source: 'teraso.com.ua',
+          responsibleUserId: ghost,
+        }),
+      })
+      expect(badResponsible.status).toBe(400)
+      expect((await badResponsible.json()).error.message).toBe(
+        'Указан несуществующий ответственный или исполнитель',
+      )
+
+      const badAssignee = await app.request('/api/crm/deals', {
+        method: 'POST',
+        headers: jsonHeaders(ownerToken),
+        body: JSON.stringify({
+          name: 'Олександр',
+          phone: '+380935335353',
+          source: 'teraso.com.ua',
+          initialTask: { kind: 'CALL', title: 'Позвонить', dueAt, assigneeUserId: ghost },
+        }),
+      })
+      expect(badAssignee.status).toBe(400)
+
+      // The failed transactions leave no partial client or deal behind.
+      expect(await prisma.client.count()).toBe(0)
+      expect(await prisma.deal.count()).toBe(0)
+
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      const badPatch = await app.request(`/api/crm/deals/${deal.id}`, {
+        method: 'PATCH',
+        headers: jsonHeaders(ownerToken),
+        body: JSON.stringify({ responsibleUserId: ghost }),
+      })
+      expect(badPatch.status).toBe(400)
+      expect((await badPatch.json()).error.message).toBe(
+        'Указан несуществующий ответственный или исполнитель',
+      )
+    })
   })
 
   /* ---------------------------------------------------------------- *
@@ -372,7 +492,13 @@ maybeDescribe('CRM clients, deals and history integration', () => {
         taskKind: 'CALL',
         dueAt: new Date(dueAt).toISOString(),
       })
-      // DEAL_CREATED and TASK_CREATED have a defined order in the timeline.
+      /**
+       * DEAL_CREATED and TASK_CREATED are written in one transaction and share an
+       * identical createdAt, so the timeline order comes from the `id` tiebreaker
+       * on monotonic uuidv7 ids, not from a per-event time offset: the
+       * later-inserted TASK_CREATED sorts first under `(createdAt desc, id desc)`.
+       */
+      expect(new Set(deal.activities.map((activity) => activity.createdAt)).size).toBe(1)
       expect(deal.activities.map((activity) => activity.kind)).toEqual([
         'TASK_CREATED',
         'DEAL_CREATED',
@@ -640,6 +766,17 @@ maybeDescribe('CRM clients, deals and history integration', () => {
             title: 'Звонок сегодня',
             dueAt: new Date(Math.min(now.getTime() + 3_600_000, today.end.getTime() - 1)),
           },
+          {
+            /**
+             * A task due today on a deal that will be marked WON below. It proves
+             * `dueToday` is gated by `isOpen`: closed work must not surface in the
+             * operational today filter even when it carries a today task.
+             */
+            dealId: won.id,
+            kind: 'CALL',
+            title: 'Хвост по выигранной',
+            dueAt: new Date(Math.min(now.getTime() + 3_600_000, today.end.getTime() - 1)),
+          },
         ],
       })
       await prisma.deal.update({
@@ -661,11 +798,13 @@ maybeDescribe('CRM clients, deals and history integration', () => {
       expect(sorted(await ids('isCritical=true'))).toEqual(
         sorted([seeded.overdue.id, seeded.staleTaskless.id]),
       )
+      // The won deal also has a task due today, but the dueToday filter is gated by isOpen.
       expect(await ids('dueToday=true')).toEqual([seeded.dueToday.id])
 
-      // A won deal is exempt from the next-step rule entirely.
+      // A won deal is exempt from the next-step rule and the today filter entirely.
       expect(await ids('noNextStep=true')).not.toContain(seeded.won.id)
       expect(await ids('isCritical=true')).not.toContain(seeded.won.id)
+      expect(await ids('dueToday=true')).not.toContain(seeded.won.id)
     })
 
     /**
