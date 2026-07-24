@@ -1,9 +1,10 @@
 import { z } from 'zod'
 
-import { filterFlagSchema, isoInstantSchema, pageNumberSchema } from './crm'
+import { filterFlagSchema, isoInstantSchema, pageNumberSchema, pageResponse } from './primitives'
 
 /* ------------------------------------------------------------------ *
- * Enumerations (mirrored by Prisma enums in backend/prisma/schema.prisma)
+ * Enumerations (mirrored by Prisma enums in backend/prisma/schema.prisma,
+ * value for value and in order; asserted in backend/src/contracts.test.ts)
  * ------------------------------------------------------------------ */
 
 export const notificationKindSchema = z.enum([
@@ -23,20 +24,38 @@ export const NOTIFICATIONS_MAX_PAGE = 1000
 export const NOTIFICATIONS_MAX_PAGE_SIZE = 100
 export const NOTIFICATIONS_MAX_READ_BATCH = 200
 
+/**
+ * An in-app destination. Must be a same-origin absolute path, because the
+ * service worker hands it to `clients.openWindow()` — an absolute URL there
+ * would let a stored notification navigate the user off-origin.
+ *
+ * The negative lookahead is load-bearing: `startsWith('/')` alone still admits
+ * the protocol-relative form `//evil.example.com`, which browsers resolve as an
+ * absolute cross-origin URL.
+ */
+const notificationHrefSchema = z
+  .string()
+  .min(1)
+  .max(500)
+  .regex(/^\/(?!\/)/, 'Ссылка уведомления должна быть внутренним путём')
+
 /* ------------------------------------------------------------------ *
  * Inbox
  * ------------------------------------------------------------------ */
 
+/**
+ * `eventKey` is deliberately absent: it is the server's cron-idempotency key,
+ * the webapp has no use for it, and this schema is strict, so exposing it would
+ * oblige every producer to populate a field nothing reads.
+ */
 export const notificationSchema = z
   .object({
     id: z.uuid(),
     kind: notificationKindSchema,
     title: z.string(),
     body: z.string(),
-    /** In-app destination, always a same-origin path such as /app/deals/<id>. */
-    href: z.string(),
+    href: notificationHrefSchema,
     dealId: z.uuid().nullable(),
-    eventKey: z.string(),
     deliveryState: notificationDeliveryStateSchema,
     readAt: isoInstantSchema.nullable(),
     createdAt: isoInstantSchema,
@@ -51,15 +70,11 @@ export const notificationListQuerySchema = z
   })
   .strict()
 
-export const notificationListResponseSchema = z
-  .object({
-    items: z.array(notificationSchema),
-    unreadCount: z.number().int().nonnegative(),
-    page: z.number().int().positive().max(NOTIFICATIONS_MAX_PAGE),
-    pageSize: z.number().int().positive().max(NOTIFICATIONS_MAX_PAGE_SIZE),
-    total: z.number().int().nonnegative(),
-    hasNext: z.boolean(),
-  })
+export const notificationListResponseSchema = pageResponse(notificationSchema, {
+  maxPage: NOTIFICATIONS_MAX_PAGE,
+  maxPageSize: NOTIFICATIONS_MAX_PAGE_SIZE,
+})
+  .extend({ unreadCount: z.number().int().nonnegative() })
   .strict()
 
 export const notificationReadRequestSchema = z
@@ -129,5 +144,6 @@ export type NotificationReadRequest = z.infer<typeof notificationReadRequestSche
 export type NotificationReadResponse = z.infer<typeof notificationReadResponseSchema>
 export type PushSubscriptionCreateInput = z.infer<typeof pushSubscriptionCreateSchema>
 export type PushSubscriptionDto = z.infer<typeof pushSubscriptionSchema>
+export type PushSubscriptionResponse = z.infer<typeof pushSubscriptionResponseSchema>
 export type PushSubscriptionParams = z.infer<typeof pushSubscriptionParamsSchema>
 export type VapidPublicKeyResponse = z.infer<typeof vapidPublicKeyResponseSchema>

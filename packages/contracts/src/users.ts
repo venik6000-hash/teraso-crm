@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { emailSchema, userRoleSchema, userSchema } from './auth'
+import { optionalQueryText, pageNumberSchema, pageResponse } from './primitives'
 
 export const updateProfileRequestSchema = z
   .object({
@@ -14,19 +15,14 @@ export const updateProfileResponseSchema = z
   })
   .strict()
 
-const positiveIntegerQuerySchema = (defaultValue: number, maximum?: number) =>
-  z.coerce.number().int().positive().max(maximum ?? Number.MAX_SAFE_INTEGER).default(defaultValue)
-
 export const ADMIN_USERS_MAX_PAGE = 100
+export const ADMIN_USERS_MAX_PAGE_SIZE = 100
 
 export const adminUsersQuerySchema = z
   .object({
-    q: z.preprocess(
-      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-      z.string().trim().max(100).optional(),
-    ),
-    page: positiveIntegerQuerySchema(1, ADMIN_USERS_MAX_PAGE),
-    pageSize: positiveIntegerQuerySchema(20, 100),
+    q: optionalQueryText(100),
+    page: pageNumberSchema(1, ADMIN_USERS_MAX_PAGE),
+    pageSize: pageNumberSchema(20, ADMIN_USERS_MAX_PAGE_SIZE),
   })
   .strict()
 
@@ -46,15 +42,10 @@ export const adminUserSummarySchema = z
   })
   .strict()
 
-export const adminUsersResponseSchema = z
-  .object({
-    items: z.array(adminUserSummarySchema),
-    page: z.number().int().positive().max(ADMIN_USERS_MAX_PAGE),
-    pageSize: z.number().int().positive().max(100),
-    total: z.number().int().nonnegative(),
-    hasNext: z.boolean(),
-  })
-  .strict()
+export const adminUsersResponseSchema = pageResponse(adminUserSummarySchema, {
+  maxPage: ADMIN_USERS_MAX_PAGE,
+  maxPageSize: ADMIN_USERS_MAX_PAGE_SIZE,
+}).strict()
 
 export const adminDashboardResponseSchema = z
   .object({

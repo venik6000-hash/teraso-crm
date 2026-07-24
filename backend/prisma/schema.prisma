@@ -98,7 +98,14 @@ model Deal {
   stage             DealStage         @default(NEW)
   leadClass         LeadClass?        @map("lead_class")
   lossReason        LossReason?       @map("loss_reason")
+  /// When the lead arrived. This is the inbound anchor: the auto-created
+  /// "Первично обработать заявку" task is due at submittedAt + 30 minutes.
+  /// It is NOT the anchor for the no-next-step grace window — see createdAt.
   submittedAt       DateTime          @map("submitted_at")
+  /// The editable marketing label shown on the card, e.g. "teraso.com.ua".
+  /// It is operational data an owner may correct at any time, and it is NOT the
+  /// integration identity: see IngestionReceipt.source, which must never be
+  /// derived from, synced with, or updated to follow this field.
   source            String
   form              String?
   landingUrl        String?           @map("landing_url")
@@ -117,6 +124,11 @@ model Deal {
   fullPaymentAmount Decimal?          @map("full_payment_amount") @db.Decimal(14, 2)
   fullPaymentPaidAt DateTime?         @map("full_payment_paid_at")
   currentNote       String?           @map("current_note")
+  /// When the row was written. This is the anchor for the 30-minute grace window
+  /// a taskless open deal gets before it becomes critical. A manually created
+  /// deal may carry a backdated submittedAt, so the two must not be interchanged:
+  /// anchoring the grace window on submittedAt would make such a deal critical
+  /// the instant it is created.
   createdAt         DateTime          @default(now()) @map("created_at")
   updatedAt         DateTime          @updatedAt @map("updated_at")
 
@@ -161,22 +173,37 @@ model DealTask {
 
 /// Append-only history. It carries no updatedAt because PRD 10 forbids editing
 /// the log after the fact. The author is null for system events such as the
-/// inbound webhook. metadata records before/after values and, for STAGE_CHANGED,
-/// the fromStage/toStage pair the dashboard funnel is aggregated from.
+/// inbound webhook.
+///
+/// fromStage/toStage are first-class typed columns rather than metadata keys.
+/// PRD 7.8 item 5 computes the funnel from STAGE_CHANGED rows inside a period,
+/// not from the current stage snapshot, so this pair is the only record that a
+/// deal ever passed through a stage — a JSONB key could not be typed against
+/// the enum, indexed for the period scan, or trusted to have been written.
+/// metadata keeps the genuinely free-form part, such as field before/after values.
+///
+/// onDelete is Restrict, not Cascade: PRD 10 states the event log is never
+/// rewritten after the fact, so deleting a deal must fail loudly rather than
+/// silently erase its history.
 model DealActivity {
   id           String           @id @default(dbgenerated("uuidv7()")) @db.Uuid
   dealId       String           @map("deal_id") @db.Uuid
   kind         DealActivityKind
   text         String?
+  fromStage    DealStage?       @map("from_stage")
+  toStage      DealStage?       @map("to_stage")
   authorUserId String?          @map("author_user_id") @db.Uuid
   metadata     Json?
   createdAt    DateTime         @default(now()) @map("created_at")
 
-  deal   Deal  @relation(fields: [dealId], references: [id], onDelete: Cascade, map: "deal_activities_deal_id_fkey")
+  deal   Deal  @relation(fields: [dealId], references: [id], onDelete: Restrict, map: "deal_activities_deal_id_fkey")
   author User? @relation(fields: [authorUserId], references: [id], onDelete: SetNull, map: "deal_activities_author_user_id_fkey")
 
   @@index([dealId, createdAt], map: "deal_activities_deal_id_created_at_idx")
-  @@index([kind, createdAt], map: "deal_activities_kind_created_at_idx")
+  /// Serves both the timeline-by-kind lookup and the dashboard's period-scoped
+  /// funnel aggregation; the leading columns keep the plain (kind, created_at)
+  /// filter just as fast while covering the grouped stage pair.
+  @@index([kind, createdAt, fromStage, toStage], map: "deal_activities_kind_created_at_stage_idx")
   @@map("deal_activities")
 }
 
@@ -184,10 +211,14 @@ model DealActivity {
 /// they can never be mistaken for them. One row per deal: the dashboard joins it
 /// 1:1 when grouping sources, and a second submission on an open deal is
 /// recorded as an activity plus an ingestion receipt instead.
+/// externalId deliberately does not live here. An external id is unique only
+/// within a source, and IngestionReceipt already stores the qualified
+/// (source, externalId) pair; a second unqualified copy would be a fact with two
+/// homes, both written by the same ingest path and free to drift. The attribution
+/// DTO projects it from the deal's earliest receipt.
 model LeadAttribution {
   id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
   dealId      String   @unique(map: "lead_attributions_deal_id_key") @map("deal_id") @db.Uuid
-  externalId  String?  @map("external_id")
   metaEventId String?  @map("meta_event_id")
   utmSource   String?  @map("utm_source")
   utmMedium   String?  @map("utm_medium")
@@ -206,16 +237,27 @@ model LeadAttribution {
 
 /// Proof that one external submission was stored. The unique pair is what makes
 /// a redelivered webhook return the original deal instead of creating a second.
+///
+/// onDelete is Restrict, not Cascade. This row IS the deduplication guarantee:
+/// if deleting a deal removed its receipts, the site could redeliver the same
+/// externalId and be handed a brand-new deal, defeating the one property the
+/// whole webhook design rests on.
 model IngestionReceipt {
   id         String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  /// The immutable integration identity captured at delivery, and half of the
+  /// idempotency key. Never derived from, synced with, or updated to follow
+  /// Deal.source, which is an editable marketing label the owner may rename.
   source     String
   externalId String   @map("external_id")
   dealId     String   @map("deal_id") @db.Uuid
+  /// The payload's own receivedAt, so a replay investigation by source +
+  /// externalId can tell what arrived and when, without storing the raw body
+  /// (which carries the UTM and click identifiers kept out of general reach).
+  receivedAt DateTime @map("received_at")
   createdAt  DateTime @default(now()) @map("created_at")
-  deal       Deal     @relation(fields: [dealId], references: [id], onDelete: Cascade, map: "ingestion_receipts_deal_id_fkey")
+  deal       Deal     @relation(fields: [dealId], references: [id], onDelete: Restrict, map: "ingestion_receipts_deal_id_fkey")
 
   @@unique([source, externalId], map: "ingestion_receipts_source_external_id_key")
-  @@index([dealId], map: "ingestion_receipts_deal_id_idx")
   @@map("ingestion_receipts")
 }
 
