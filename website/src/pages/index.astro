@@ -1,0 +1,33 @@
+---
+import CtaSection from '@/components/landing/CtaSection.astro'
+import FeatureGrid from '@/components/landing/FeatureGrid.astro'
+import HeroSection from '@/components/landing/HeroSection.astro'
+import ProcessSection from '@/components/landing/ProcessSection.astro'
+import ProofSection from '@/components/landing/ProofSection.astro'
+import SiteFooter from '@/components/landing/SiteFooter.astro'
+import SiteHeader from '@/components/landing/SiteHeader.astro'
+import BaseLayout from '@/layouts/BaseLayout.astro'
+
+const title = 'Northstar — чистый старт для сильного продукта'
+const description =
+  'Модульный шаблон публичного сайта на Astro, Tailwind CSS и shadcn/ui: быстрый, адаптивный и готовый к развитию.'
+const publicWebsiteUrl = import.meta.env.PUBLIC_WEBSITE_URL
+const publicWebappUrl = import.meta.env.PUBLIC_WEBAPP_URL
+const canonicalUrl = publicWebsiteUrl
+  ? new URL(Astro.url.pathname, publicWebsiteUrl).toString()
+  : undefined
+const primaryHref = publicWebappUrl ?? '#features'
+const primaryLabel = publicWebappUrl ? 'Открыть приложение' : 'Посмотреть возможности'
+---
+
+<BaseLayout canonicalUrl={canonicalUrl} description={description} title={title}>
+  <SiteHeader primaryHref={primaryHref} primaryLabel={primaryLabel} />
+  <main id="main-content">
+    <HeroSection primaryHref={primaryHref} primaryLabel={primaryLabel} />
+    <FeatureGrid />
+    <ProcessSection />
+    <ProofSection />
+    <CtaSection primaryHref={primaryHref} primaryLabel={primaryLabel} />
+  </main>
+  <SiteFooter />
+</BaseLayout>

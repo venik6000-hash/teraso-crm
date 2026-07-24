@@ -1,0 +1,262 @@
+import { z } from 'zod'
+
+const booleanStringSchema = z
+  .enum(['true', 'false'])
+  .default('false')
+  .transform((value) => value === 'true')
+
+const knownWeakJwtSecrets = new Set(['replace-with-at-least-32-random-characters'])
+
+const optionalStringSchema = z.preprocess((value) => {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}, z.string().min(1).optional())
+
+const optionalUrlSchema = z.preprocess((value) => {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}, z.string().url().optional())
+
+const optionalHttpHeaderNameSchema = z.preprocess((value) => {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed.toLowerCase()
+}, z.string().regex(/^[a-z0-9!#$%&'*+.^_`|~-]+$/).optional())
+
+const stringWithDefault = (defaultValue: string) =>
+  z.preprocess((value) => {
+    if (typeof value !== 'string') return value
+    const trimmed = value.trim()
+    return trimmed === '' ? undefined : trimmed
+  }, z.string().min(1).default(defaultValue))
+
+const envSchema = z.object({
+  NODE_ENV: z.string().optional(),
+  PORT: z.coerce.number().int().positive().default(3000),
+  DATABASE_URL: z.string().min(1),
+  JWT_SECRET: z.string().min(32),
+  CORS_ORIGINS: z
+    .string()
+    .default('http://localhost:5173,http://localhost:8081,http://localhost:19006')
+    .transform((value) =>
+      value
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    ),
+  WEBAPP_ORIGIN: optionalUrlSchema,
+  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(15 * 60),
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
+  REFRESH_REUSE_GRACE_SECONDS: z.coerce.number().int().nonnegative().max(60).default(10),
+  SESSION_ABSOLUTE_TTL_DAYS: z.coerce.number().int().positive().default(90),
+  SESSION_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(7),
+  AUTH_BODY_LIMIT_BYTES: z.coerce.number().int().positive().max(1024 * 1024).default(64 * 1024),
+  AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+  AUTH_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+  SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().positive().max(60).default(20),
+  TRUST_PROXY: booleanStringSchema,
+  TRUSTED_PROXY_CLIENT_IP_HEADER: optionalHttpHeaderNameSchema,
+  TRUSTED_PROXY_CLIENT_IP_POSITION: z.enum(['first', 'last']).optional(),
+  COOKIE_SECURE: booleanStringSchema,
+  SPACES_REGION: optionalStringSchema,
+  SPACES_BUCKET: optionalStringSchema,
+  SPACES_ENDPOINT: optionalUrlSchema,
+  SPACES_CDN_BASE_URL: optionalUrlSchema,
+  SPACES_ACCESS_KEY_ID: optionalStringSchema,
+  SPACES_SECRET_ACCESS_KEY: optionalStringSchema,
+  SPACES_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+  SPACES_UPLOAD_URL_TTL_SECONDS: z.coerce.number().int().positive().max(7 * 24 * 60 * 60).default(15 * 60),
+  SPACES_DOWNLOAD_URL_TTL_SECONDS: z.coerce.number().int().positive().max(7 * 24 * 60 * 60).default(5 * 60),
+  SPACES_PUBLIC_CACHE_CONTROL: stringWithDefault('public, max-age=31536000, immutable'),
+}).superRefine((env, ctx) => {
+  validateJwtSecret(env, ctx)
+  validateProductionRuntime(env, ctx)
+  validateCorsOrigins(env, ctx)
+  validateWebappOrigin(env, ctx)
+  validateSessionTtls(env, ctx)
+  validateTrustedProxy(env, ctx)
+  validateStorageEnv(env, ctx)
+})
+
+export type AppEnv = z.infer<typeof envSchema>
+
+export function loadEnv(source: Record<string, string | undefined>) {
+  return envSchema.parse(source)
+}
+
+function validateWebappOrigin(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  if (!env.WEBAPP_ORIGIN) return
+
+  const url = new URL(env.WEBAPP_ORIGIN)
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['WEBAPP_ORIGIN'],
+      message: 'WEBAPP_ORIGIN must use http or https',
+    })
+  }
+  if (url.origin !== env.WEBAPP_ORIGIN) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['WEBAPP_ORIGIN'],
+      message: 'WEBAPP_ORIGIN must contain an origin only, not a path',
+    })
+  }
+  if ((env.COOKIE_SECURE || env.NODE_ENV === 'production') && url.protocol !== 'https:') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['WEBAPP_ORIGIN'],
+      message: 'WEBAPP_ORIGIN must use HTTPS in production',
+    })
+  }
+}
+
+function validateSessionTtls(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  if (env.SESSION_ABSOLUTE_TTL_DAYS < env.REFRESH_TOKEN_TTL_DAYS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['SESSION_ABSOLUTE_TTL_DAYS'],
+      message: 'SESSION_ABSOLUTE_TTL_DAYS must be at least REFRESH_TOKEN_TTL_DAYS',
+    })
+  }
+}
+
+function validateTrustedProxy(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  if (env.TRUST_PROXY && !env.TRUSTED_PROXY_CLIENT_IP_HEADER) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['TRUSTED_PROXY_CLIENT_IP_HEADER'],
+      message: 'TRUSTED_PROXY_CLIENT_IP_HEADER is required when TRUST_PROXY=true',
+    })
+  }
+
+  if (env.TRUSTED_PROXY_CLIENT_IP_POSITION && !env.TRUSTED_PROXY_CLIENT_IP_HEADER) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['TRUSTED_PROXY_CLIENT_IP_POSITION'],
+      message: 'TRUSTED_PROXY_CLIENT_IP_POSITION requires TRUSTED_PROXY_CLIENT_IP_HEADER',
+    })
+  }
+}
+
+function validateJwtSecret(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  if (!isProductionLikeRuntime(env)) return
+
+  const invalidProductionFormat = !/^[a-fA-F0-9]{64,}$/.test(env.JWT_SECRET)
+  if (isWeakJwtSecret(env.JWT_SECRET) || invalidProductionFormat) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['JWT_SECRET'],
+      message: 'JWT_SECRET must be a non-placeholder random secret in production',
+    })
+  }
+}
+
+function validateProductionRuntime(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  if (env.NODE_ENV !== 'production') return
+
+  if (!env.COOKIE_SECURE) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['COOKIE_SECURE'],
+      message: 'COOKIE_SECURE must be true in production',
+    })
+  }
+}
+
+function isProductionLikeRuntime(env: z.infer<typeof envSchema>) {
+  return env.NODE_ENV === 'production' || env.COOKIE_SECURE
+}
+
+function isWeakJwtSecret(secret: string) {
+  const normalized = secret.trim().toLowerCase()
+  return (
+    normalized.length === 0 ||
+    knownWeakJwtSecrets.has(normalized) ||
+    new Set(normalized).size === 1
+  )
+}
+
+function validateCorsOrigins(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  if (env.CORS_ORIGINS.length === 0) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['CORS_ORIGINS'],
+      message: 'CORS_ORIGINS must contain at least one allowed browser origin',
+    })
+    return
+  }
+
+  for (const origin of env.CORS_ORIGINS) {
+    if (origin === '*') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ORIGINS'],
+        message: 'CORS_ORIGINS must not use wildcard origins when credentials are enabled',
+      })
+      continue
+    }
+
+    let url: URL
+    try {
+      url = new URL(origin)
+    } catch {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ORIGINS'],
+        message: `CORS_ORIGINS contains an invalid URL: ${origin}`,
+      })
+      continue
+    }
+
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ORIGINS'],
+        message: `CORS_ORIGINS must use http or https origins: ${origin}`,
+      })
+    }
+
+    if (url.origin !== origin) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ORIGINS'],
+        message: `CORS_ORIGINS must contain origins only, not paths: ${origin}`,
+      })
+    }
+
+    if ((env.COOKIE_SECURE || env.NODE_ENV === 'production') && url.protocol !== 'https:') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ORIGINS'],
+        message: `CORS_ORIGINS must use HTTPS when COOKIE_SECURE=true: ${origin}`,
+      })
+    }
+  }
+}
+
+function validateStorageEnv(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  const requiredStorageKeys = [
+    'SPACES_REGION',
+    'SPACES_BUCKET',
+    'SPACES_ENDPOINT',
+    'SPACES_ACCESS_KEY_ID',
+    'SPACES_SECRET_ACCESS_KEY',
+  ] as const
+  const storageConfigured =
+    requiredStorageKeys.some((key) => env[key] !== undefined) || env.SPACES_CDN_BASE_URL !== undefined
+
+  if (!storageConfigured) return
+
+  for (const key of requiredStorageKeys) {
+    if (env[key] === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [key],
+        message: `${key} is required when DigitalOcean Spaces storage is configured`,
+      })
+    }
+  }
+}

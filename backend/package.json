@@ -1,0 +1,48 @@
+{
+  "name": "@teraso-crm/backend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run prisma:generate && bun --watch src/index.ts",
+    "start": "bun run start:api",
+    "start:api": "bun run prisma:generate && bun src/index.ts",
+    "start:worker": "bun src/worker.ts",
+    "start:cron": "bun src/cron.ts",
+    "start:raw": "bun src/index.ts",
+    "build": "bun run prisma:generate && tsc --noEmit",
+    "typecheck": "bun run prisma:generate && tsc --noEmit",
+    "test": "bun run test:unit && bun run test:integration",
+    "test:unit": "bun run prisma:generate && bun test scripts/deploy-database.test.ts scripts/seed-admin.test.ts src/app.test.ts src/background-tasks.test.ts src/env.test.ts src/db.test.ts src/contracts.test.ts src/cron.test.ts src/runtime.test.ts src/shutdown.test.ts src/modules/auth/application/auth-service.test.ts src/modules/auth/infrastructure/access-tokens.test.ts src/modules/auth/infrastructure/auth-repository.test.ts src/modules/auth/infrastructure/passwords.test.ts src/modules/auth/infrastructure/refresh-tokens.test.ts src/modules/auth/transport/middleware.test.ts src/modules/auth/transport/routes.test.ts src/modules/users/application/users-service.test.ts src/modules/users/infrastructure/admin-bootstrap.test.ts src/storage/service.test.ts",
+    "test:integration": "bun scripts/test-integration.mjs",
+    "smoke:docker": "bun scripts/docker-smoke.mjs",
+    "prisma": "prisma",
+    "prisma:generate": "bun scripts/prisma-generate.mjs",
+    "prisma:generate:raw": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:seed": "prisma db seed",
+    "db:deploy": "bun scripts/deploy-database.ts",
+    "prisma:validate": "prisma validate"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1091.0",
+    "@aws-sdk/s3-request-presigner": "^3.1091.0",
+    "@hono/zod-openapi": "^1.4.0",
+    "@hono/zod-validator": "^0.9.0",
+    "@prisma/adapter-pg": "^7.9.0",
+    "@prisma/client": "^7.9.0",
+    "@teraso-crm/contracts": "workspace:*",
+    "dotenv": "^17.4.2",
+    "hono": "^4.12.31",
+    "jose": "^6.2.3",
+    "pg": "^8.20.0",
+    "prisma": "^7.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/pg": "^8.20.0",
+    "typescript": "~6.0.3"
+  }
+}
