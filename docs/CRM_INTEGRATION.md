@@ -27,7 +27,13 @@ Every delivery carries two headers:
 | Header | Value |
 | --- | --- |
 | `x-teraso-timestamp` | Unix time **in seconds** of *this* delivery attempt (UTC). |
-| `x-teraso-signature` | Lowercase hex HMAC-SHA256, computed as below. |
+| `x-teraso-signature` | HMAC-SHA256 as **exactly 64 lowercase hex characters** (`[0-9a-f]`), computed as below. |
+
+The signature encoding is checked strictly: uppercase hex, a shorter or longer
+string, or any trailing character is rejected with `401` on format alone, before
+the secret is used. Send exactly what `.digest("hex")` returns — Node's default is
+already lowercase. (Leading/trailing whitespace around a header value is stripped
+by HTTP itself and is harmless.)
 
 ### Signing bytes
 
@@ -108,6 +114,22 @@ timestamp will be refused with `400`. Convert to UTC and send the `Z` form:
 
 `receivedAt` is the lead's arrival time and stays the same across retries; it is
 distinct from `x-teraso-timestamp`, which is the time of the current attempt.
+
+### `receivedAt` must be inside the sanity window
+
+`receivedAt` drives both the deal's submission time and the follow-up task's due
+time, so it is bounded relative to server time and a value outside the window is
+rejected with `400`:
+
+- **Up to 7 days in the past** — generous, because a legitimate delivery can be an
+  old lead replayed from the site's backlog after a CRM outage.
+- **Up to 1 hour in the future** — tight, because no legitimate lead arrives from
+  the future; that tolerance exists only for clock skew. A far-future `receivedAt`
+  would create a deal whose follow-up task is due far out, so the lead would never
+  be flagged critical and would silently never surface.
+
+An `externalId` consisting only of whitespace is rejected for the same "fail loud"
+reason: it would otherwise become an idempotency key shared by every such delivery.
 
 ### Redacted example payload
 
@@ -196,10 +218,58 @@ Set in the backend environment only (never in the browser). See
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TERASO_WEBHOOK_SECRET` | *(none)* | HMAC secret shared with the site. **Unset ⇒ the endpoint fails closed and rejects every delivery with `401`.** Set a long random value in production. |
+| `TERASO_WEBHOOK_SECRET` | *(none)* | HMAC secret shared with the site. **Unset ⇒ the endpoint fails closed and rejects every delivery with `401`.** See the strength rules below. |
 | `TERASO_WEBHOOK_MAX_AGE_SECONDS` | `300` | Freshness window for `x-teraso-timestamp`, in seconds. |
 | `TERASO_WEBHOOK_BODY_LIMIT_BYTES` | `65536` | Maximum raw body size; larger ⇒ `413`. |
 
-Every rejected delivery is logged server-side with its reason (`signature`,
-`age`, `body-limit`, or `validation`) for traceability; the secret, the raw
-signature, and the payload body are never written to the log.
+### Secret strength
+
+This secret is the *only* thing standing in front of the only unauthenticated
+public write endpoint in the system, so it is validated at boot, not at
+exploitation time. **Generate it, never type it:**
+
+```sh
+openssl rand -hex 32
+```
+
+- **Every environment:** a non-empty value must be at least **32 characters**, or
+  the process fails to start.
+- **Production** (`NODE_ENV=production` or `COOKIE_SECURE=true`): it must also be a
+  generated-looking secret — **64+ hex characters**, not a known placeholder, not a
+  single repeated character. A memorable passphrase is rejected.
+- **Unset is valid and safe**: the endpoint fails closed, so an environment that has
+  not wired up the site integration still boots.
+- Failures name the variable and never echo its value. Rotate by setting the new
+  value on both sides; a delivery signed with the old secret fails `401` and the
+  site's normal retry succeeds once both sides agree.
+
+Why it matters: an attacker who captures a single legitimate
+`(timestamp, body, signature)` triple can brute-force a weak key **offline** and
+then inject arbitrary signed leads — creating clients, deals and tasks, poisoning
+attribution, and triggering new-lead notifications at will.
+
+### Rejection logging, flood risk, and the required compensating control
+
+Every rejected delivery is logged server-side with its reason (`signature`, `age`,
+`body-limit`, or `validation`) for traceability. The secret, the raw signature, and
+the payload body are never written to the log.
+
+Because the endpoint is unauthenticated, that log is itself a target: an attacker
+who floods garbage signatures could inflate log volume and bury the genuine
+rejection records operators rely on. The application therefore **throttles the
+rejection log per reason** — the first occurrence of each distinct reason is logged
+immediately, repeats within a 60-second window are counted rather than printed, and
+the suppressed count is reported on the next line for that reason. Volume stays
+bounded to roughly one line per reason per minute no matter the request rate, and a
+flood of one kind can never hide a different kind.
+
+**Accepted residual risk.** The endpoint is deliberately *not* behind the
+application's per-IP auth rate-limiter: that limiter would throttle the site's
+legitimate retry bursts, which this document explicitly promises to support. The
+compute cost of a flood is bounded (one HMAC over at most 64 KB, no database work
+before the signature passes), so a flood is an availability and observability
+concern rather than a path to compromise.
+
+**Required compensating control:** apply an infrastructure-level rate limit to
+`POST /api/crm/inbound/quiz` at the WAF or load balancer, sized above the site's
+legitimate retry burst. Operating this is covered in the deployment runbook.

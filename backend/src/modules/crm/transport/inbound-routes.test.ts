@@ -10,6 +10,7 @@ import { createApp } from '../../../app'
 import { createPrisma } from '../../../db'
 import type { DbClient } from '../../../db'
 import type { AppEnv } from '../../../env'
+import { createInboundRoutes } from './inbound-routes'
 
 /**
  * The webhook authenticates the Teraso site by an HMAC-SHA256 signature over
@@ -153,6 +154,95 @@ describe('inbound quiz webhook signature and framing', () => {
     expect(response.status).toBe(401)
   })
 
+  /**
+   * `Buffer.from(hex, 'hex')` decodes valid pairs from the start and stops at the
+   * first invalid character, so a correct 64-character signature with trailing
+   * garbage still decodes to the right 32 bytes and would pass a length check plus
+   * `timingSafeEqual`. That is not forgeable — the leading 64 characters must still
+   * be the exact HMAC, which needs the secret — but the one security check in the
+   * system must accept exactly the canonical encoding and nothing else.
+   */
+  test('refuses a correct signature carrying a trailing non-hex character', async () => {
+    // Signed over a schema-invalid body on purpose: if the signature gate wrongly
+    // accepted this, the request would reach validation and answer 400 instead.
+    const invalidPayload = JSON.stringify({ externalId: 'lead_x' })
+    const timestamp = freshTimestamp()
+    const signature = sign(WEBHOOK_SECRET, timestamp, invalidPayload)
+
+    // Non-hex trailing garbage, and a trailing hex pair that overruns the fixed
+    // 64-character length. Both decoded to the correct 32 bytes before the gate.
+    for (const suffix of ['zz', 'gg', '!!', '00']) {
+      const response = await deliver(app, invalidPayload, {
+        timestamp,
+        signature: `${signature}${suffix}`,
+      })
+      expect(`${suffix} -> ${response.status}`).toBe(`${suffix} -> 401`)
+    }
+  })
+
+  /**
+   * Trailing whitespace is a different case, and deliberately not a rejection: HTTP
+   * header values are whitespace-trimmed by the transport itself, so what reaches the
+   * signature gate is already the canonical 64-character value. Asserting a 401 here
+   * would be asserting a property of the HTTP layer, not of this code. The 400 below
+   * means the (correct) signature was accepted and the request went on to fail schema
+   * validation, which is the honest behaviour.
+   */
+  test('accepts a signature whose only defect is header whitespace the HTTP layer strips', async () => {
+    const invalidPayload = JSON.stringify({ externalId: 'lead_x' })
+    const timestamp = freshTimestamp()
+    const signature = sign(WEBHOOK_SECRET, timestamp, invalidPayload)
+
+    const response = await deliver(app, invalidPayload, { timestamp, signature: `${signature} ` })
+    expect(response.status).toBe(400)
+  })
+
+  test('refuses an uppercase-hex signature, since the documented encoding is lowercase', async () => {
+    const invalidPayload = JSON.stringify({ externalId: 'lead_x' })
+    const timestamp = freshTimestamp()
+    const signature = sign(WEBHOOK_SECRET, timestamp, invalidPayload).toUpperCase()
+
+    const response = await deliver(app, invalidPayload, { timestamp, signature })
+    expect(response.status).toBe(401)
+  })
+
+  /**
+   * Only `x-teraso-timestamp` is freshness-checked; `receivedAt` is signed but
+   * otherwise free-floating, and it drives both `submittedAt` and the auto-task due
+   * time. A far-future value would produce a deal whose follow-up is due far out and
+   * which therefore never turns critical — a lead that silently never surfaces.
+   * The rejection happens before persistence, so the stub Prisma client is untouched.
+   */
+  test('refuses a far-future receivedAt that would hide the lead from the critical list', async () => {
+    const farFuture = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    const response = await deliverSigned(app, JSON.stringify(leadPayload({ receivedAt: farFuture })))
+
+    expect(response.status).toBe(400)
+    expect((await response.json()).error.message).toBe('Недопустимое время получения заявки')
+  })
+
+  test('refuses a receivedAt far in the past, outside the redelivery backlog window', async () => {
+    const longAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
+    const response = await deliverSigned(app, JSON.stringify(leadPayload({ receivedAt: longAgo })))
+
+    expect(response.status).toBe(400)
+  })
+
+  test('accepts a receivedAt backdated well inside the window, as a real retry would be', async () => {
+    // Two hours ago: exactly the deliberately-backdated shape the e2e test uses. It
+    // must reach the schema-valid path, not be refused as out of bounds. The stub
+    // Prisma client would throw if it got that far, so a 400 here means the bound
+    // rejected it — the regression this guards.
+    const backdated = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+    const response = await deliverSigned(
+      app,
+      JSON.stringify({ ...leadPayload({ receivedAt: backdated }), phone: 'not-a-phone' }),
+    )
+    // The phone is what fails, proving the time bound let it through.
+    expect(response.status).toBe(400)
+    expect((await response.json()).error.message).toBe('Укажите корректный номер телефона')
+  })
+
   test('refuses a correctly signed but stale delivery older than the max age', async () => {
     const stale = String(Math.floor((Date.now() - 6 * 60 * 1000) / 1000))
     const response = await deliver(app, rawBody, {
@@ -180,6 +270,83 @@ describe('inbound quiz webhook signature and framing', () => {
     const oversized = JSON.stringify({ ...leadPayload(), needTiming: 'x'.repeat(1024) })
     const response = await deliverSigned(smallLimitApp, oversized)
     expect(response.status).toBe(413)
+  })
+
+  /**
+   * The endpoint is unauthenticated and deliberately outside the per-IP auth
+   * rate-limiter (which would throttle the site's legitimate retry bursts), so an
+   * attacker can flood it. One log line per rejected delivery would inflate log
+   * volume and bury the genuine rejection records operators rely on — the defence
+   * eating itself. Volume must stay bounded while every distinct reason stays visible.
+   */
+  test('throttles the rejection log under a flood while keeping each distinct reason visible', async () => {
+    // A fresh app, so this test owns the throttle windows rather than inheriting
+    // whatever the tests above left open on the shared instance.
+    const floodApp = createApp({ env: makeEnv(), prisma: {} as DbClient })
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '))
+    }
+
+    try {
+      for (let index = 0; index < 50; index += 1) {
+        await deliver(floodApp, rawBody)
+      }
+      // A different reason, after the flood: it must still be logged immediately.
+      const stale = String(Math.floor((Date.now() - 6 * 60 * 1000) / 1000))
+      await deliver(floodApp, rawBody, {
+        timestamp: stale,
+        signature: sign(WEBHOOK_SECRET, stale, rawBody),
+      })
+    } finally {
+      console.warn = originalWarn
+    }
+
+    // 50 signature rejections collapse to a single line...
+    expect(warnings.filter((line) => line.includes('(signature)'))).toHaveLength(1)
+    // ...and the flood never hides the unrelated stale-signature record.
+    expect(warnings.filter((line) => line.includes('(age)'))).toHaveLength(1)
+    expect(warnings).toHaveLength(2)
+  })
+
+  /**
+   * Nothing is silently dropped: the repeats suppressed inside a window are counted
+   * and reported on the next line for that reason. Driven through
+   * `createInboundRoutes` directly because it takes the clock the throttle reads,
+   * which `createApp` does not expose.
+   */
+  test('reports how many repeats were suppressed once the window rolls over', async () => {
+    let currentTime = Date.parse('2026-07-23T10:00:00.000Z')
+    const routes = createInboundRoutes({
+      service: {} as never,
+      clock: { now: () => new Date(currentTime) },
+      webhook: { secret: WEBHOOK_SECRET, maxAgeSeconds: 300, bodyLimitBytes: 64 * 1024 },
+    })
+    const unsigned = () => routes.request('/quiz', { method: 'POST', body: rawBody })
+
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '))
+    }
+
+    try {
+      await unsigned()
+      for (let index = 0; index < 4; index += 1) await unsigned()
+      expect(warnings).toHaveLength(1)
+
+      // Roll past the window; the next rejection reports the four it swallowed.
+      currentTime += 61_000
+      await unsigned()
+    } finally {
+      console.warn = originalWarn
+    }
+
+    expect(warnings).toHaveLength(2)
+    expect(warnings[1]).toContain('+4 more suppressed')
+    // The secret is never written to the log, throttled or not.
+    expect(warnings.join(' ')).not.toContain(WEBHOOK_SECRET)
   })
 
   test('fail-closed: an unconfigured secret rejects even a would-be valid delivery', async () => {

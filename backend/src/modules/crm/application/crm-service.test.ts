@@ -175,6 +175,48 @@ describe('inbound quiz lead', () => {
     )
     expect(calls.recordInboundQuizLead).toHaveLength(0)
   })
+
+  /**
+   * `receivedAt` is signed but, unlike `x-teraso-timestamp`, is not otherwise
+   * constrained, and it drives the auto-task's due time. A far-future value would
+   * produce a lead that never turns critical and so silently never surfaces — an
+   * invisible failure, which is worse than a loud one.
+   */
+  test('bounds receivedAt tightly in the future and generously in the past', async () => {
+    const { calls, service } = createService()
+    const at = (offsetMs: number) => new Date(now.getTime() + offsetMs).toISOString()
+
+    // Tight forwards: only clock skew is legitimate.
+    await expect(
+      service.recordInboundQuizLead({ ...lead, receivedAt: at(2 * 60 * 60 * 1000) }),
+    ).rejects.toThrow('Недопустимое время получения заявки')
+
+    // Generous backwards, but not unbounded.
+    await expect(
+      service.recordInboundQuizLead({ ...lead, receivedAt: at(-30 * 24 * 60 * 60 * 1000) }),
+    ).rejects.toThrow('Недопустимое время получения заявки')
+
+    expect(calls.recordInboundQuizLead).toHaveLength(0)
+
+    // A retry backlog after an outage, and the deliberately backdated e2e shape,
+    // both stay inside the window.
+    await service.recordInboundQuizLead({ ...lead, receivedAt: at(-2 * 60 * 60 * 1000) })
+    await service.recordInboundQuizLead({ ...lead, receivedAt: at(-6 * 24 * 60 * 60 * 1000) })
+    await service.recordInboundQuizLead({ ...lead, receivedAt: at(-30 * 60 * 1000) })
+    expect(calls.recordInboundQuizLead).toHaveLength(3)
+  })
+
+  test('refuses a whitespace-only external id that would degenerate the idempotency key', async () => {
+    const { calls, service } = createService()
+
+    // The contract bounds externalId at 1..160 characters but does not trim it, so
+    // " " passes the schema and would otherwise become a key shared by every such
+    // delivery.
+    await expect(service.recordInboundQuizLead({ ...lead, externalId: '   ' })).rejects.toThrow(
+      'Не указан внешний идентификатор заявки',
+    )
+    expect(calls.recordInboundQuizLead).toHaveLength(0)
+  })
 })
 
 describe('actor and clock', () => {

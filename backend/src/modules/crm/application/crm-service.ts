@@ -27,6 +27,22 @@ type CrmServiceDependencies = {
 }
 
 /**
+ * Sanity bounds for an inbound lead's own `receivedAt`, which is signed but — unlike
+ * `x-teraso-timestamp` — is not otherwise constrained, and which drives both the
+ * deal's `submittedAt` and the auto-task's due time.
+ *
+ * The window is deliberately asymmetric. A legitimate delivery can be well in the
+ * past: the site retries a backlog after a CRM outage, and Task 8's end-to-end test
+ * backdates on purpose so the auto-task is already overdue. A legitimate delivery is
+ * never meaningfully in the future — only clock skew — while a far-future value is
+ * the dangerous one: it produces a deal whose follow-up task is due far out, so the
+ * lead never turns critical and silently never surfaces. Generous backwards, tight
+ * forwards, closes that failure mode without refusing real retries.
+ */
+const INBOUND_RECEIVED_AT_MAX_PAST_MS = 7 * 24 * 60 * 60 * 1000
+const INBOUND_RECEIVED_AT_MAX_FUTURE_MS = 60 * 60 * 1000
+
+/**
  * Use-case orchestration for clients, deals and their history.
  *
  * Authorization is deliberately "authenticated" and nothing finer. PRD 3 gives
@@ -155,11 +171,29 @@ export class CrmService {
    * by the system (null author), unlike every bearer-authenticated method above.
    */
   async recordInboundQuizLead(input: InboundQuizLeadInput): Promise<InboundQuizLeadResult> {
+    const now = this.now()
+    const receivedAt = new Date(input.receivedAt)
+    if (!isReceivedAtWithinBounds(receivedAt, now)) {
+      throw new CrmFailure('validation', 'Недопустимое время получения заявки')
+    }
+
+    /**
+     * The contract bounds `externalId` at 1..160 characters but, unlike `source` and
+     * the other strings, does not `.trim()` it — that asymmetry is settled in Task 2
+     * and is not worth a contract change rippling through five call sites. So it is
+     * normalized defensively here and in the repository, and a value that is only
+     * whitespace is refused: it would otherwise pass the schema and become a
+     * degenerate idempotency key shared by every such delivery.
+     */
+    if (input.externalId.trim() === '') {
+      throw new CrmFailure('validation', 'Не указан внешний идентификатор заявки')
+    }
+
     return this.dependencies.repository.recordInboundQuizLead({
       input,
       phoneNormalized: normalizeUaPhone(input.phone),
-      receivedAt: new Date(input.receivedAt),
-      now: this.now(),
+      receivedAt,
+      now,
     })
   }
 
@@ -170,4 +204,10 @@ export class CrmService {
 
 function dealNotFound() {
   return new CrmFailure('not_found', 'Сделка не найдена')
+}
+
+/** See INBOUND_RECEIVED_AT_MAX_PAST_MS for why the window is asymmetric. */
+function isReceivedAtWithinBounds(receivedAt: Date, now: Date): boolean {
+  const offsetMs = now.getTime() - receivedAt.getTime()
+  return offsetMs <= INBOUND_RECEIVED_AT_MAX_PAST_MS && -offsetMs <= INBOUND_RECEIVED_AT_MAX_FUTURE_MS
 }

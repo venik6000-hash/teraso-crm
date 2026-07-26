@@ -15,7 +15,6 @@ import {
   type DealStage,
   type DealSummaryDto,
   type DealTaskDto,
-  type InboundQuizLeadInput,
   type InboundQuizLeadResult,
   type TaskCreateInput,
 } from '@teraso-crm/contracts'
@@ -362,6 +361,21 @@ function lockTask(tx: Pick<TransactionClient, '$executeRaw'>, taskId: string) {
 }
 
 /**
+ * The advisory-lock key for one inbound delivery's idempotency identity.
+ *
+ * Length-prefixed (netstring style) rather than simply joined on `:`, because a
+ * plain join is ambiguous: `source="a", externalId="b:c"` and `source="a:b",
+ * externalId="c"` would produce one key and needlessly serialize two unrelated
+ * leads. Prefixing each component with its length makes the encoding injective, so
+ * one key means exactly one `(source, externalId)` pair.
+ *
+ * Exported for the unit test that pins that property; nothing else imports it.
+ */
+export function inboundLeadLockKey(source: string, externalId: string): string {
+  return `inbound:${source.length}:${source}:${externalId.length}:${externalId}`
+}
+
+/**
  * The idempotency-identity advisory lock for one inbound delivery, held for the
  * transaction. Retried and concurrent deliveries of ONE lead are the site's normal
  * behaviour, so this is taken as the FIRST statement of the inbound transaction —
@@ -379,7 +393,7 @@ function lockInboundLead(
   externalId: string,
 ) {
   return tx.$executeRaw(
-    Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`inbound:${source}:${externalId}`}, 0))`,
+    Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${inboundLeadLockKey(source, externalId)}, 0))`,
   )
 }
 
@@ -899,23 +913,22 @@ async function recordInboundQuizLeadTransaction(
   command: InboundQuizLeadCommand,
 ): Promise<InboundQuizLeadResult> {
   const { input, phoneNormalized, receivedAt, now } = command
+  /**
+   * The contract trims `source` but not `externalId` (a settled Task 2 asymmetry),
+   * so it is normalized here — once — and that single value is used for the lock
+   * key, the receipt lookup, the receipt write and the activity metadata. Deriving
+   * them from different spellings would break idempotency outright: the lookup would
+   * miss a receipt the write had stored.
+   */
+  const externalId = input.externalId.trim()
 
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await db.$transaction(async (tx) => {
-        await lockInboundLead(tx, input.source, input.externalId)
+        await lockInboundLead(tx, input.source, externalId)
 
-        const existingReceipt = await tx.ingestionReceipt.findUnique({
-          where: { source_externalId: { source: input.source, externalId: input.externalId } },
-          select: { dealId: true, deal: { select: { clientId: true } } },
-        })
-        if (existingReceipt) {
-          return {
-            status: 'duplicate-delivery',
-            clientId: existingReceipt.deal.clientId,
-            dealId: existingReceipt.dealId,
-          }
-        }
+        const existingReceipt = await findInboundReceipt(tx, input.source, externalId)
+        if (existingReceipt) return existingReceipt
 
         const client = await resolveClientWithinTx(tx, { name: input.name, phoneNormalized })
 
@@ -932,7 +945,7 @@ async function recordInboundQuizLeadTransaction(
         // id for the timeline; both are display context, not the click identifiers.
         const inboundMetadata: DealActivityMetadata = {
           source: input.source,
-          externalId: input.externalId,
+          externalId,
         }
 
         if (openDeal) {
@@ -943,7 +956,7 @@ async function recordInboundQuizLeadTransaction(
             now,
             metadata: inboundMetadata,
           })
-          await writeInboundReceipt(tx, input, openDeal.id, receivedAt)
+          await writeInboundReceipt(tx, input.source, externalId, openDeal.id, receivedAt)
           return { status: 'attached-to-open-deal', clientId: client.id, dealId: openDeal.id }
         }
 
@@ -993,7 +1006,7 @@ async function recordInboundQuizLeadTransaction(
           fallbackAssigneeUserId: null,
         })
 
-        await writeInboundReceipt(tx, input, deal.id, receivedAt)
+        await writeInboundReceipt(tx, input.source, externalId, deal.id, receivedAt)
 
         return {
           status: client.wasCreated ? 'created' : 'new-deal-for-existing-client',
@@ -1002,6 +1015,19 @@ async function recordInboundQuizLeadTransaction(
         }
       })
     } catch (error) {
+      /**
+       * Belt and braces for the idempotency guarantee. The advisory lock makes this
+       * unreachable today — two deliveries of one key cannot both pass the receipt
+       * check — which is exactly why it is handled rather than trusted: if the lock
+       * ever regressed, the unique index would still hold, but the loser's P2002 is
+       * not a phone conflict, so it would fall through as an opaque 500. Re-reading
+       * the committed receipt returns the same answer the caller would have got had
+       * it arrived a millisecond later.
+       */
+      if (isIngestionReceiptConflict(error)) {
+        const settled = await findInboundReceipt(db, input.source, externalId)
+        if (settled) return settled
+      }
       if (attempt === 0 && isClientPhoneConflict(error)) continue
       throw translateWriteError(error)
     }
@@ -1009,20 +1035,38 @@ async function recordInboundQuizLeadTransaction(
 }
 
 /**
+ * The stored receipt for one idempotency identity, shaped as the duplicate-delivery
+ * answer. Used both inside the transaction (the ordinary redelivery check) and after
+ * a unique-violation rollback, so the two paths cannot report a delivery differently.
+ */
+async function findInboundReceipt(
+  client: Pick<DbClient, 'ingestionReceipt'>,
+  source: string,
+  externalId: string,
+): Promise<InboundQuizLeadResult | null> {
+  const receipt = await client.ingestionReceipt.findUnique({
+    where: { source_externalId: { source, externalId } },
+    select: { dealId: true, deal: { select: { clientId: true } } },
+  })
+  if (!receipt) return null
+  return { status: 'duplicate-delivery', clientId: receipt.deal.clientId, dealId: receipt.dealId }
+}
+
+/**
  * Writes the proof-of-delivery receipt. `source` is the delivery's immutable
  * integration identity, captured verbatim from the payload — never Deal.source,
  * which is an editable marketing label. Coupling them would let a relabelled deal
- * change the idempotency key and admit a duplicate on redelivery.
+ * change the idempotency key and admit a duplicate on redelivery. `externalId` is
+ * the caller's already-normalized value, so the write and the lookup always agree.
  */
 function writeInboundReceipt(
   tx: TransactionClient,
-  input: InboundQuizLeadInput,
+  source: string,
+  externalId: string,
   dealId: string,
   receivedAt: Date,
 ) {
-  return tx.ingestionReceipt.create({
-    data: { source: input.source, externalId: input.externalId, dealId, receivedAt },
-  })
+  return tx.ingestionReceipt.create({ data: { source, externalId, dealId, receivedAt } })
 }
 
 /* ------------------------------------------------------------------ *
@@ -1037,21 +1081,38 @@ function writeInboundReceipt(
 
 /** A unique-violation on the client's phone, whichever field spelling the driver reports. */
 function isClientPhoneConflict(error: unknown): boolean {
+  return isUniqueViolationOn(error, 'phone_normalized')
+}
+
+/** A unique-violation on the `[source, external_id]` receipt identity. */
+function isIngestionReceiptConflict(error: unknown): boolean {
+  return isUniqueViolationOn(error, 'external_id')
+}
+
+/**
+ * A P2002 naming `column`, whichever spelling the driver reports. The pg driver
+ * adapter this repository runs under (db.ts) leaves `meta.target` undefined and
+ * reports the constraint at `meta.driverAdapterError.cause.constraint.fields`
+ * instead, so an earlier target-only check silently never matched and left the
+ * retry dead. Both shapes plus the message text are covered here, once, so the two
+ * conflict detectors above cannot drift apart.
+ */
+function isUniqueViolationOn(error: unknown, column: string): boolean {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
     return false
   }
   const fields = (
     error.meta as { driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } } | undefined
   )?.driverAdapterError?.cause?.constraint?.fields
-  if (Array.isArray(fields) && fields.includes('phone_normalized')) return true
+  if (Array.isArray(fields) && fields.includes(column)) return true
 
   // Fallbacks for a client that populates meta.target or only the message text.
   const target = (error.meta as { target?: string | string[] } | undefined)?.target
   const targets = Array.isArray(target) ? target : target ? [target] : []
-  if (targets.some((value) => typeof value === 'string' && value.includes('phone_normalized'))) {
+  if (targets.some((value) => typeof value === 'string' && value.includes(column))) {
     return true
   }
-  return error.message.includes('phone_normalized')
+  return error.message.includes(column)
 }
 
 /**

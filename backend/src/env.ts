@@ -5,7 +5,25 @@ const booleanStringSchema = z
   .default('false')
   .transform((value) => value === 'true')
 
-const knownWeakJwtSecrets = new Set(['replace-with-at-least-32-random-characters'])
+/**
+ * Placeholders that must never survive into a production runtime. They are shared
+ * by every secret this file validates, so a value documented in .env.example cannot
+ * be promoted by accident.
+ */
+const knownWeakSecrets = new Set([
+  'replace-with-at-least-32-random-characters',
+  'replace-with-a-long-random-webhook-secret',
+])
+
+/**
+ * Length floor for the site webhook secret, in every environment. It guards the
+ * only unauthenticated public write endpoint in the system: an attacker who
+ * captures one legitimate (timestamp, body, signature) triple can brute-force a
+ * short key offline and then inject arbitrary signed leads, so a weak secret must
+ * fail at boot rather than at exploitation time. Production additionally requires a
+ * generated secret — see validateWebhookSecret.
+ */
+const TERASO_WEBHOOK_SECRET_MIN_LENGTH = 32
 
 /**
  * Defaults for the optional Teraso webhook limits, applied where the config is
@@ -33,6 +51,19 @@ const optionalHttpHeaderNameSchema = z.preprocess((value) => {
   const trimmed = value.trim()
   return trimmed === '' ? undefined : trimmed.toLowerCase()
 }, z.string().regex(/^[a-z0-9!#$%&'*+.^_`|~-]+$/).optional())
+
+/**
+ * An optional secret with a length floor. Blank is normalized to "unset" (the
+ * consumer decides how to fail closed); any non-blank value must clear the floor,
+ * so a short secret is a boot failure rather than a silently weak deployment. The
+ * message names the variable and never echoes its value.
+ */
+const optionalSecretSchema = (variableName: string, minimumLength: number) =>
+  z.preprocess((value) => {
+    if (typeof value !== 'string') return value
+    const trimmed = value.trim()
+    return trimmed === '' ? undefined : trimmed
+  }, z.string().min(minimumLength, `${variableName} must be at least ${minimumLength} characters`).optional())
 
 const stringWithDefault = (defaultValue: string) =>
   z.preprocess((value) => {
@@ -66,11 +97,14 @@ const envSchema = z.object({
   AUTH_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
   // Teraso site webhook (Task 5, PRD 8 and 10). The signing secret is server-only:
   // when it is unset the inbound route fail-closes and rejects every delivery with
-  // 401. The two limits are optional and fall back to their documented defaults
-  // (WEBHOOK_MAX_AGE_SECONDS_DEFAULT / WEBHOOK_BODY_LIMIT_BYTES_DEFAULT) at the point
-  // of use in app.ts, so the many hand-built test AppEnv literals need not restate
-  // them. The max age is bounded to keep a stale-signature replay window small.
-  TERASO_WEBHOOK_SECRET: optionalStringSchema,
+  // 401, so an integration that is not configured yet still boots. A value that IS
+  // set must clear the length floor here and, in production, the generated-secret
+  // check in validateWebhookSecret. The two limits are optional and fall back to
+  // their documented defaults (WEBHOOK_MAX_AGE_SECONDS_DEFAULT /
+  // WEBHOOK_BODY_LIMIT_BYTES_DEFAULT) at the point of use in app.ts, so the many
+  // hand-built test AppEnv literals need not restate them. The max age is bounded to
+  // keep a stale-signature replay window small.
+  TERASO_WEBHOOK_SECRET: optionalSecretSchema('TERASO_WEBHOOK_SECRET', TERASO_WEBHOOK_SECRET_MIN_LENGTH),
   TERASO_WEBHOOK_MAX_AGE_SECONDS: z.coerce.number().int().positive().max(3600).optional(),
   TERASO_WEBHOOK_BODY_LIMIT_BYTES: z.coerce.number().int().positive().max(1024 * 1024).optional(),
   SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().positive().max(60).default(20),
@@ -90,6 +124,7 @@ const envSchema = z.object({
   SPACES_PUBLIC_CACHE_CONTROL: stringWithDefault('public, max-age=31536000, immutable'),
 }).superRefine((env, ctx) => {
   validateJwtSecret(env, ctx)
+  validateWebhookSecret(env, ctx)
   validateProductionRuntime(env, ctx)
   validateCorsOrigins(env, ctx)
   validateWebappOrigin(env, ctx)
@@ -162,12 +197,39 @@ function validateTrustedProxy(env: z.infer<typeof envSchema>, ctx: z.RefinementC
 function validateJwtSecret(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
   if (!isProductionLikeRuntime(env)) return
 
-  const invalidProductionFormat = !/^[a-fA-F0-9]{64,}$/.test(env.JWT_SECRET)
-  if (isWeakJwtSecret(env.JWT_SECRET) || invalidProductionFormat) {
+  if (!isGeneratedSecret(env.JWT_SECRET)) {
     ctx.addIssue({
       code: 'custom',
       path: ['JWT_SECRET'],
       message: 'JWT_SECRET must be a non-placeholder random secret in production',
+    })
+  }
+}
+
+/**
+ * The site webhook secret gets the same production treatment as JWT_SECRET, for a
+ * sharper reason: it authenticates the only unauthenticated public write endpoint
+ * in the system (PRD 8), so a guessable value lets an attacker inject arbitrary
+ * signed leads — creating clients, deals and tasks and poisoning attribution.
+ *
+ * An UNSET secret is deliberately not an error: the inbound route fails closed and
+ * rejects every delivery, so a deployment that has not wired up the site yet still
+ * boots. It is a secret that is set but weak which must stop the process here,
+ * rather than surface at exploitation time. The length floor is enforced by the
+ * field schema in every environment; this adds the generated-value requirement.
+ */
+function validateWebhookSecret(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  if (!isProductionLikeRuntime(env)) return
+
+  const secret = env.TERASO_WEBHOOK_SECRET
+  if (secret === undefined) return
+
+  if (!isGeneratedSecret(secret)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['TERASO_WEBHOOK_SECRET'],
+      message:
+        'TERASO_WEBHOOK_SECRET must be a non-placeholder random secret in production; generate one with `openssl rand -hex 32`',
     })
   }
 }
@@ -188,11 +250,21 @@ function isProductionLikeRuntime(env: z.infer<typeof envSchema>) {
   return env.NODE_ENV === 'production' || env.COOKIE_SECURE
 }
 
-function isWeakJwtSecret(secret: string) {
+/**
+ * A secret that looks generated rather than typed: at least 64 hex characters (the
+ * `openssl rand -hex 32` shape), not a documented placeholder, and not a single
+ * repeated character. Shared by JWT_SECRET and TERASO_WEBHOOK_SECRET so both apply
+ * one definition of "strong enough for production" instead of drifting apart.
+ */
+function isGeneratedSecret(secret: string) {
+  return /^[a-fA-F0-9]{64,}$/.test(secret) && !isWeakSecret(secret)
+}
+
+function isWeakSecret(secret: string) {
   const normalized = secret.trim().toLowerCase()
   return (
     normalized.length === 0 ||
-    knownWeakJwtSecrets.has(normalized) ||
+    knownWeakSecrets.has(normalized) ||
     new Set(normalized).size === 1
   )
 }

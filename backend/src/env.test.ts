@@ -100,6 +100,85 @@ describe('loadEnv', () => {
       .toThrow('CORS_ORIGINS')
   })
 
+  /**
+   * The webhook secret guards the only unauthenticated public write endpoint in the
+   * system, so it gets the same treatment as JWT_SECRET: a length floor in every
+   * environment and a generated-secret requirement in production. A weak secret must
+   * fail at boot rather than at exploitation time — an attacker who captures one
+   * legitimate (timestamp, body, signature) triple can brute-force a short key
+   * offline and then inject arbitrary signed leads.
+   */
+  test('enforces a length floor on the webhook secret in every environment', () => {
+    const baseEnv = {
+      DATABASE_URL: 'postgresql://superuser:superpassword@localhost:54329/teraso_crm',
+      JWT_SECRET: '12345678901234567890123456789012',
+    }
+
+    expect(() => loadEnv({ ...baseEnv, TERASO_WEBHOOK_SECRET: 'too-short' }))
+      .toThrow('TERASO_WEBHOOK_SECRET')
+    // 31 characters: one below the floor.
+    expect(() => loadEnv({ ...baseEnv, TERASO_WEBHOOK_SECRET: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d' }))
+      .toThrow('TERASO_WEBHOOK_SECRET')
+
+    // Unset stays valid: the route fails closed at request time instead, so a
+    // deployment that has not configured the site integration yet still boots.
+    expect(() => loadEnv(baseEnv)).not.toThrow()
+    expect(() => loadEnv({ ...baseEnv, TERASO_WEBHOOK_SECRET: '' })).not.toThrow()
+    expect(loadEnv({ ...baseEnv, TERASO_WEBHOOK_SECRET: '' }).TERASO_WEBHOOK_SECRET).toBeUndefined()
+
+    // At the floor, a development secret is accepted outside production.
+    expect(() => loadEnv({ ...baseEnv, TERASO_WEBHOOK_SECRET: '0123456789abcdef'.repeat(2) }))
+      .not.toThrow()
+  })
+
+  test('requires a generated, non-placeholder webhook secret in production-like runtimes', () => {
+    const productionBase = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgresql://superuser:superpassword@localhost:54329/teraso_crm',
+      JWT_SECRET: '0123456789abcdef'.repeat(4),
+      COOKIE_SECURE: 'true',
+      CORS_ORIGINS: 'https://web.example.com',
+    }
+
+    // A generated 64-character hex secret is the supported production shape.
+    expect(() =>
+      loadEnv({ ...productionBase, TERASO_WEBHOOK_SECRET: 'fedcba9876543210'.repeat(4) }),
+    ).not.toThrow()
+
+    // Long enough to clear the floor, but memorable rather than generated.
+    expect(() =>
+      loadEnv({
+        ...productionBase,
+        TERASO_WEBHOOK_SECRET: 'a-memorable-human-secret-phrase-that-is-long-enough',
+      }),
+    ).toThrow('TERASO_WEBHOOK_SECRET')
+
+    // The documented placeholder must never reach production.
+    expect(() =>
+      loadEnv({
+        ...productionBase,
+        TERASO_WEBHOOK_SECRET: 'replace-with-a-long-random-webhook-secret',
+      }),
+    ).toThrow('TERASO_WEBHOOK_SECRET')
+
+    // Zero-entropy: one repeated character.
+    expect(() =>
+      loadEnv({ ...productionBase, TERASO_WEBHOOK_SECRET: 'a'.repeat(64) }),
+    ).toThrow('TERASO_WEBHOOK_SECRET')
+
+    // The failure names the variable and never echoes its value.
+    const failure = (() => {
+      try {
+        loadEnv({ ...productionBase, TERASO_WEBHOOK_SECRET: 'a-memorable-human-secret-phrase-that-is-long-enough' })
+        return ''
+      } catch (error) {
+        return String(error)
+      }
+    })()
+    expect(failure).toContain('TERASO_WEBHOOK_SECRET')
+    expect(failure).not.toContain('a-memorable-human-secret-phrase')
+  })
+
   test('rejects unsafe production CORS origins', () => {
     const baseEnv = {
       DATABASE_URL: 'postgresql://superuser:superpassword@localhost:54329/teraso_crm',

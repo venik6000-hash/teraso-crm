@@ -42,6 +42,8 @@ type RejectionReason = 'signature' | 'age' | 'body-limit' | 'validation'
  */
 export function createInboundRoutes({ service, clock, webhook }: CreateInboundRoutesOptions) {
   const routes = new Hono()
+  // Per-instance so two apps in one process cannot throttle each other's logs.
+  const logRejectedDelivery = createRejectionLogger(clock)
 
   // The webhook's own body limit, independent of the auth surface. A body over the
   // limit is refused here before the signature is even computed.
@@ -120,10 +122,23 @@ function unauthorized(c: Context, message: string) {
   return c.json(errorResponse('UNAUTHORIZED', message), 401)
 }
 
+/** SHA-256 as lowercase hex: exactly 64 characters from `[0-9a-f]`. */
+const CANONICAL_SIGNATURE = /^[0-9a-f]{64}$/
+
 /**
  * Constant-time HMAC comparison. `timingSafeEqual` throws when the buffers differ
- * in length, so lengths are compared first — a forged signature of the wrong size
- * is a plain `false`, never a 500, and a plain `===` timing oracle is avoided.
+ * in length, so lengths are compared too — a forged signature of the wrong size is a
+ * plain `false`, never a 500, and a plain `===` timing oracle is avoided.
+ *
+ * The format gate comes first, and it is strict on purpose. `Buffer.from(hex,
+ * 'hex')` decodes valid pairs from the start and stops at the first invalid
+ * character, so `<correct 64 hex> + "zz"` — or a trailing space, newline, or the
+ * uppercase spelling — would otherwise decode to the correct 32 bytes and pass.
+ * That is not forgeable (the leading 64 characters must still be the exact HMAC,
+ * which requires the secret), but the one security check in the system should accept
+ * exactly the canonical encoding and nothing else. Uppercase is rejected rather than
+ * folded, because CRM_INTEGRATION.md is the contract the site implements against and
+ * it specifies lowercase. Rejecting on format alone leaks nothing about the secret.
  */
 function isValidSignature(
   secret: string,
@@ -131,8 +146,9 @@ function isValidSignature(
   rawBody: string,
   providedHex: string,
 ): boolean {
+  if (!CANONICAL_SIGNATURE.test(providedHex)) return false
+
   const expected = createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest()
-  // A malformed hex string yields a buffer of the wrong length, caught below.
   const provided = Buffer.from(providedHex, 'hex')
   if (provided.length !== expected.length) return false
   return timingSafeEqual(provided, expected)
@@ -150,10 +166,51 @@ function isFresh(timestamp: string, maxAgeSeconds: number, now: Date): boolean {
 }
 
 /**
- * Traceability without leakage (PRD 8): the reason and a short detail reach the
- * server log so a failed webhook can be investigated, but the secret, the raw
- * signature and the payload body are never written.
+ * How long one rejection reason stays quiet after it has been logged once.
  */
-function logRejectedDelivery(reason: RejectionReason, detail: string) {
-  console.warn(`[inbound-quiz] rejected delivery (${reason}): ${detail}`)
+const REJECTION_LOG_WINDOW_MS = 60_000
+
+/**
+ * Traceability without leakage, and without a self-defeating defence (PRD 8).
+ *
+ * The reason and a short detail reach the server log so a failed webhook can be
+ * investigated; the secret, the raw signature and the payload body are never
+ * written. But the endpoint is unauthenticated, so an attacker flooding garbage
+ * signatures could otherwise emit one line per request, inflating log volume and
+ * burying the genuine rejection records operators rely on — the defence eating
+ * itself.
+ *
+ * So logging is throttled PER REASON: each of the four reasons keeps its own
+ * window, so a flood of one kind can never hide a different kind, and the first
+ * occurrence of any reason is always logged immediately. Within a window the
+ * repeats are counted rather than printed, and the count is reported on the next
+ * line for that reason, so nothing is silently lost. Volume is bounded to roughly
+ * one line per reason per minute regardless of request rate.
+ *
+ * The state lives per router instance rather than in a module global, so two apps
+ * in one process (as in the tests) cannot throttle each other.
+ *
+ * This is the code-side half of the mitigation only. The endpoint remains
+ * deliberately outside the per-IP auth rate-limiter — it would throttle the site's
+ * legitimate retry bursts — so an infrastructure-level rate limit at the WAF or load
+ * balancer remains the required compensating control; see docs/CRM_INTEGRATION.md.
+ */
+function createRejectionLogger(clock: Clock) {
+  const windows = new Map<RejectionReason, { endsAt: number; suppressed: number }>()
+
+  return (reason: RejectionReason, detail: string) => {
+    const now = clock.now().getTime()
+    const current = windows.get(reason)
+
+    if (current && now < current.endsAt) {
+      current.suppressed += 1
+      return
+    }
+
+    const suppressed = current?.suppressed ?? 0
+    windows.set(reason, { endsAt: now + REJECTION_LOG_WINDOW_MS, suppressed: 0 })
+    const summary =
+      suppressed > 0 ? ` (+${suppressed} more suppressed in the previous window)` : ''
+    console.warn(`[inbound-quiz] rejected delivery (${reason}): ${detail}${summary}`)
+  }
 }
