@@ -54,6 +54,21 @@ function dealSummary(overrides: Partial<DealSummaryDto> = {}): DealSummaryDto {
   }
 }
 
+function activeTask(): NonNullable<DealSummaryDto['nearestActiveTask']> {
+  return {
+    id: '33333333-3333-4333-8333-333333333333',
+    dealId: DEAL_ID,
+    kind: 'CALL',
+    title: 'Перезвонить клиенту',
+    dueAt: '2026-07-21T09:00:00.000Z',
+    status: 'ACTIVE',
+    assigneeUserId: USER_ID,
+    assigneeName: 'owner@teraso.com.ua',
+    completedAt: null,
+    createdAt: '2026-07-20T08:31:00.000Z',
+  }
+}
+
 const defaultQuery = parseDealListSearch({})
 
 /* ------------------------------------------------------------------ *
@@ -257,7 +272,13 @@ test('the deal list renders the PRD key fields and links to the deal card', asyn
 test('the deal list stacks into cards on a phone instead of scrolling sideways', async () => {
   const markup = await renderInRouter(<DealList deals={[dealSummary()]} />)
 
-  expect(markup).toContain('block sm:table')
+  // Each cell keeps a label of its own, which is what makes a stacked card
+  // readable once the column headers are hidden on a narrow screen. The absence
+  // of a horizontal scrollbar itself is measured in a browser, not asserted on
+  // a class name here.
+  for (const label of ['Заявка', 'Сумма', 'Следующий шаг', 'Ответственный']) {
+    expect(markup.split(label).length - 1).toBeGreaterThanOrEqual(2)
+  }
 })
 
 test('the filter bar tells the owner that the three stage filters are one choice', () => {
@@ -274,11 +295,37 @@ test('the filter bar tells the owner that the three stage filters are one choice
   expect(markup.match(/role="radio"/g)?.length).toBe(3)
 })
 
-test('the deal list never re-derives urgency from the clock', async () => {
-  const source = await Bun.file(
-    new URL('../src/features/crm/components/DealList.tsx', import.meta.url),
-  ).text()
+test('the deal list reports urgency as the server served it, not from the clock', async () => {
+  const calmButLongPast = await renderInRouter(
+    <DealList
+      deals={[
+        dealSummary({
+          hasOverdueTask: false,
+          isCritical: false,
+          nearestActiveTask: { ...activeTask(), dueAt: '2020-01-01T09:00:00.000Z' },
+        }),
+      ]}
+    />,
+  )
+  const urgentButFutureDated = await renderInRouter(
+    <DealList
+      deals={[
+        dealSummary({
+          hasOverdueTask: true,
+          isCritical: true,
+          nearestActiveTask: { ...activeTask(), dueAt: '2099-01-01T09:00:00.000Z' },
+        }),
+      ]}
+    />,
+  )
 
-  expect(source).not.toContain('Date.now(')
-  expect(source).not.toContain('new Date(')
+  // A task due in 2020 is not late unless the API says so...
+  expect(calmButLongPast).not.toContain('просрочено')
+  expect(calmButLongPast).not.toContain('Требует действия')
+  // ...and one due in 2099 is, if the API says so.
+  expect(urgentButFutureDated).toContain('просрочено')
+  expect(urgentButFutureDated).toContain('Требует действия')
+  // The task kind survives the overdue state: whether to call or to write is
+  // the one thing needed to act on the row.
+  expect(urgentButFutureDated).toContain('Звонок · просрочено')
 })

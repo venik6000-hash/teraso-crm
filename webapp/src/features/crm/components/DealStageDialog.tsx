@@ -31,24 +31,16 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Typography } from '@/components/typography'
 import {
   DEAL_STAGE_LABELS,
   LOSS_REASON_LABELS,
-  dealFormFieldErrors,
   toInstantFromKyivInput,
   toKyivDateTimeInput,
 } from '../model'
+import { emptyFormErrors, toFormErrors } from '../validation'
+import { CrmSelectField, CrmTextField, CrmTextareaField } from './CrmField'
 
 /**
  * Moves a deal through the funnel from the card (PRD 7.3).
@@ -122,7 +114,7 @@ function StageChangeDialog({
   const [comment, setComment] = useState('')
   const [amount, setAmount] = useState('')
   const [paidAt, setPaidAt] = useState(toKyivDateTimeInput(new Date().toISOString()))
-  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [errors, setErrors] = useState(emptyFormErrors)
 
   const options = dealStageSchema.options.filter((option) => option !== deal.stage)
   const needsPrepayment = stage === 'PREPAYMENT'
@@ -131,7 +123,7 @@ function StageChangeDialog({
 
   const submit = () => {
     if (!stage) {
-      setErrors({ stage: 'Выберите этап' })
+      setErrors({ fields: { stage: 'Выберите этап' }, formMessage: null })
       return
     }
 
@@ -149,11 +141,11 @@ function StageChangeDialog({
 
     const parsed = dealStageChangeSchema.safeParse(payload)
     if (!parsed.success) {
-      setErrors(dealFormFieldErrors(parsed.error.issues))
+      setErrors(toFormErrors(parsed.error.issues))
       return
     }
 
-    setErrors({})
+    setErrors(emptyFormErrors)
     // Closed once the payload is valid: a rejection from the server is a fact
     // about the deal, so it belongs on the card next to the stage it names,
     // not hidden inside a dialog the owner has to reopen to read.
@@ -176,95 +168,72 @@ function StageChangeDialog({
           </DialogDescription>
         </DialogHeader>
 
+        {errors.formMessage && (
+          <Alert variant="destructive">
+            <AlertTitle>Этап не изменён</AlertTitle>
+            <AlertDescription>{errors.formMessage}</AlertDescription>
+          </Alert>
+        )}
+
         <div className="grid gap-4">
-          <div className="grid gap-2">
-            <Label htmlFor="stage-target">Новый этап</Label>
-            <Select
-              onValueChange={(value) => {
-                setStage(dealStageSchema.parse(value))
-                setErrors({})
-              }}
-              value={stage ?? undefined}
-            >
-              <SelectTrigger id="stage-target">
-                <SelectValue placeholder="Выберите этап" />
-              </SelectTrigger>
-              <SelectContent>
-                {options.map((option) => (
-                  <SelectItem key={option} value={option}>
-                    {DEAL_STAGE_LABELS[option]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <FieldError message={errors.stage} />
-          </div>
+          <CrmSelectField
+            error={errors.fields.stage}
+            label="Новый этап"
+            onChange={(value) => {
+              setStage(dealStageSchema.parse(value))
+              setErrors(emptyFormErrors)
+            }}
+            options={options.map((option) => ({
+              label: DEAL_STAGE_LABELS[option],
+              value: option,
+            }))}
+            placeholder="Выберите этап"
+            value={stage ?? undefined}
+          />
 
           {needsLossReason && (
-            <div className="grid gap-2">
-              <Label htmlFor="stage-loss-reason">Причина потери</Label>
-              <Select
-                onValueChange={(value) => setLossReason(lossReasonSchema.parse(value))}
-                value={lossReason ?? undefined}
-              >
-                <SelectTrigger id="stage-loss-reason">
-                  <SelectValue placeholder="Выберите причину" />
-                </SelectTrigger>
-                <SelectContent>
-                  {lossReasonSchema.options.map((option) => (
-                    <SelectItem key={option} value={option}>
-                      {LOSS_REASON_LABELS[option]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <FieldError message={errors.lossReason} />
-            </div>
+            <CrmSelectField
+              error={errors.fields.lossReason}
+              label="Причина потери"
+              onChange={(value) => setLossReason(lossReasonSchema.parse(value))}
+              options={lossReasonSchema.options.map((option) => ({
+                label: LOSS_REASON_LABELS[option],
+                value: option,
+              }))}
+              placeholder="Выберите причину"
+              value={lossReason ?? undefined}
+            />
           )}
 
           {(needsPrepayment || needsFullPayment) && (
             <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-2">
-                <Label htmlFor="stage-amount">
-                  {needsPrepayment ? 'Сумма предоплаты' : 'Сумма полной оплаты'}
-                </Label>
-                <Input
-                  id="stage-amount"
-                  inputMode="decimal"
-                  onChange={(event) => setAmount(event.target.value)}
-                  placeholder="65000.00"
-                  value={amount}
-                />
-                <FieldError
-                  message={errors.prepaymentAmount ?? errors.fullPaymentAmount}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="stage-paid-at">Дата оплаты</Label>
-                <Input
-                  id="stage-paid-at"
-                  onChange={(event) => setPaidAt(event.target.value)}
-                  type="datetime-local"
-                  value={paidAt}
-                />
-                <FieldError
-                  message={errors.prepaymentPaidAt ?? errors.fullPaymentPaidAt}
-                />
-              </div>
+              <CrmTextField
+                error={errors.fields.prepaymentAmount ?? errors.fields.fullPaymentAmount}
+                inputMode="decimal"
+                label={needsPrepayment ? 'Сумма предоплаты' : 'Сумма полной оплаты'}
+                onChange={setAmount}
+                placeholder="65000.00"
+                value={amount}
+              />
+              <CrmTextField
+                description="Время по Киеву"
+                error={errors.fields.prepaymentPaidAt ?? errors.fields.fullPaymentPaidAt}
+                label="Дата оплаты"
+                onChange={setPaidAt}
+                type="datetime-local"
+                value={paidAt}
+              />
             </div>
           )}
 
-          <div className="grid gap-2">
-            <Label htmlFor="stage-comment">Комментарий в ленту</Label>
-            <Textarea
-              id="stage-comment"
-              maxLength={4000}
-              onChange={(event) => setComment(event.target.value)}
-              rows={2}
-              value={comment}
-            />
-            <FieldError message={errors.comment} />
-          </div>
+          <CrmTextareaField
+            error={errors.fields.comment}
+            label="Комментарий в ленту"
+            maxLength={4000}
+            onChange={setComment}
+            rows={2}
+            value={comment}
+          />
         </div>
 
         <DialogFooter>
@@ -279,14 +248,5 @@ function StageChangeDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null
-  return (
-    <Typography role="alert" variant="caption" tone="destructive">
-      {message}
-    </Typography>
   )
 }

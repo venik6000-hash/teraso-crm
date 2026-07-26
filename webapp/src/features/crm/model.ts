@@ -1,8 +1,6 @@
 import {
-  APP_PATH_PREFIX,
   DEALS_MAX_PAGE,
   dealListQuerySchema,
-  dealPath,
   type DealListQuery,
   type DealActivityKind,
   type DealStage,
@@ -14,7 +12,8 @@ import {
   type TaskKind,
   type TaskStatus,
 } from '@teraso-crm/contracts'
-import type { z } from 'zod'
+
+import { urlQueryState } from '@/platform/url-query-state'
 
 /* ------------------------------------------------------------------ *
  * Destinations
@@ -29,19 +28,6 @@ import type { z } from 'zod'
  * contract, not this constant.
  */
 export const DEAL_DETAIL_ROUTE_PATH = '/app/deals/$dealId'
-
-export const CRM_PATHS = {
-  dashboard: `${APP_PATH_PREFIX}/dashboard`,
-  deals: `${APP_PATH_PREFIX}/deals`,
-  board: `${APP_PATH_PREFIX}/board`,
-  tasks: `${APP_PATH_PREFIX}/tasks`,
-  notifications: `${APP_PATH_PREFIX}/notifications`,
-} as const
-
-/** Always built from the contract so a link and a stored notification agree. */
-export function dealHref(dealId: string) {
-  return dealPath(dealId)
-}
 
 /* ------------------------------------------------------------------ *
  * Russian labels
@@ -227,9 +213,10 @@ export function formatPhone(phoneNormalized: string) {
  * element's `title`, so nothing is lost.
  */
 export function personLabel(value: string | null | undefined, fallback = 'Не назначен') {
-  if (!value) return fallback
-  const email = value.match(/^([^@\s]+)@[^@\s]+$/)
-  return email ? email[1]! : value
+  const trimmed = value?.trim()
+  if (!trimmed) return fallback
+  const email = trimmed.match(/^([^@\s]+)@[^@\s]+$/)
+  return email ? email[1]! : trimmed
 }
 
 /**
@@ -312,8 +299,12 @@ export function toInstantFromKyivInput(value: string) {
   const asUtc = new Date(`${value.length === 16 ? `${value}:00` : value}Z`)
   if (Number.isNaN(asUtc.getTime())) return ''
   const firstPass = new Date(asUtc.getTime() - kyivOffsetMs(asUtc))
-  // One correction pass: on the far side of a DST change the offset that
-  // applies to the resulting instant is not the one that applied to the guess.
+  // One correction pass, because the offset that applies to the resulting
+  // instant is not always the one that applied to the guess. The two DST hours
+  // are pinned in crm-state.test.tsx: the repeated autumn hour resolves to its
+  // second pass and round trips, while the hour the spring change skips
+  // resolves an hour later and deliberately does not round trip — a wall-clock
+  // time that never happened is answered with the real instant instead.
   return new Date(asUtc.getTime() - kyivOffsetMs(firstPass)).toISOString()
 }
 
@@ -350,67 +341,24 @@ const DEAL_LIST_QUERY_KEYS = [
   'direction',
 ] as const
 
-const DEAL_LIST_DEFAULTS = dealListQuerySchema.parse({})
+const dealListUrlState = urlQueryState(dealListQuerySchema, DEAL_LIST_QUERY_KEYS)
 
-/**
- * Turns raw URL search values into a valid query.
- *
- * The contract schema is strict and has no idea which key broke, so an unknown
- * or malformed parameter would otherwise throw during navigation and take the
- * whole route down. Unknown keys are dropped up front and invalid ones are
- * removed one round at a time, which degrades a hand-edited or stale URL to the
- * default view instead of an error screen.
- */
-export function parseDealListSearch(raw: Record<string, unknown>): DealListQuery {
-  let candidate: Record<string, unknown> = {}
-  for (const key of DEAL_LIST_QUERY_KEYS) {
-    const value = raw[key]
-    if (value === undefined || value === null || value === '') continue
-    candidate[key] = value
-  }
-
-  for (let attempt = 0; attempt <= DEAL_LIST_QUERY_KEYS.length; attempt += 1) {
-    const parsed = dealListQuerySchema.safeParse(candidate)
-    if (parsed.success) return parsed.data
-
-    const rejected = new Set(
-      parsed.error.issues
-        .map((issue) => issue.path[0])
-        .filter((key): key is string => typeof key === 'string'),
-    )
-    if (rejected.size === 0) break
-    candidate = Object.fromEntries(
-      Object.entries(candidate).filter(([key]) => !rejected.has(key)),
-    )
-  }
-
-  return dealListQuerySchema.parse({})
-}
+/** Raw URL search values -> a complete, valid query. */
+export const parseDealListSearch = dealListUrlState.parse
 
 /**
  * The inverse: only what differs from the default view reaches the address bar,
  * so a shared link stays readable and the default list has a clean URL.
  */
-export function toDealListSearch(query: DealListQuery): Partial<DealListQuery> {
-  const search: Record<string, unknown> = {}
-  for (const key of DEAL_LIST_QUERY_KEYS) {
-    const value = query[key]
-    if (value === undefined || value === DEAL_LIST_DEFAULTS[key]) continue
-    search[key] = value
-  }
-  return search as Partial<DealListQuery>
-}
+export const toDealListSearch = dealListUrlState.serialize
 
 /**
- * The route's `validateSearch`: it keeps the address bar to what the owner
- * actually chose, and the page turns that back into a complete query. Carrying
- * the sparse form through the router is deliberate — a route search type with
- * every default spelled out would force every link into the list to repeat
- * them, and the defaults would show up in shared URLs.
+ * The route's `validateSearch`. Carrying the sparse form through the router is
+ * deliberate: a route search type with every default spelled out would force
+ * every link into the list to repeat them, and the defaults would then show up
+ * in shared URLs.
  */
-export function cleanDealListSearch(raw: Record<string, unknown>): Partial<DealListQuery> {
-  return toDealListSearch(parseDealListSearch(raw))
-}
+export const cleanDealListSearch = dealListUrlState.clean
 
 /**
  * PRD 7.5 names six quick filters, and they are not one kind of thing.
@@ -456,6 +404,54 @@ export function activeQuickFilterIds(query: DealListQuery): DealQuickFilterId[] 
   return DEAL_QUICK_FILTERS.filter((filter) =>
     filter.kind === 'flag' ? query[filter.flag] : query.stage === filter.stage,
   ).map((filter) => filter.id)
+}
+
+/**
+ * Every filter currently narrowing the list, named and individually clearable.
+ *
+ * This is what keeps the controls honest. Three of the six stages are not quick
+ * filters, `isCritical` has no control at all (Task 8's dashboard deep-links
+ * into it), and any of them can arrive from a shared URL — so a summary built
+ * from the query itself, rather than from the controls, is the only rendering
+ * that cannot claim "no filters" while the list is filtered.
+ */
+export function activeDealFilters(
+  query: DealListQuery,
+): ReadonlyArray<{ key: keyof DealListQuery; label: string; value: string }> {
+  const active: Array<{ key: keyof DealListQuery; label: string; value: string }> = []
+  const add = (key: keyof DealListQuery, label: string, value: string | undefined | null) => {
+    if (value) active.push({ key, label, value })
+  }
+
+  add('q', 'Поиск', query.q)
+  add('stage', 'Этап', query.stage && DEAL_STAGE_LABELS[query.stage])
+  add('leadClass', 'Класс', query.leadClass && LEAD_CLASS_LABELS[query.leadClass])
+  add('source', 'Источник', query.source)
+  add('material', 'Материал', query.material && MATERIAL_LABELS[query.material])
+  add('needTiming', 'Срок потребности', query.needTiming)
+  add('responsibleUserId', 'Ответственный', query.responsibleUserId ? 'только мои' : null)
+  add('submittedFrom', 'Заявки с', query.submittedFrom)
+  add('submittedTo', 'Заявки по', query.submittedTo)
+  add('amountMin', 'Сумма от', query.amountMin)
+  add('amountMax', 'Сумма до', query.amountMax)
+  add('noNextStep', 'Без следующего шага', query.noNextStep ? 'да' : null)
+  add('overdue', 'Просрочено', query.overdue ? 'да' : null)
+  add('dueToday', 'Сегодня', query.dueToday ? 'да' : null)
+  add('isCritical', 'Только критичные', query.isCritical ? 'да' : null)
+
+  return active
+}
+
+/** Clears one filter from the summary, whatever kind it is. */
+export function clearDealFilter(
+  query: DealListQuery,
+  key: keyof DealListQuery,
+): DealListQuery {
+  const cleared =
+    key === 'noNextStep' || key === 'overdue' || key === 'dueToday' || key === 'isCritical'
+      ? false
+      : undefined
+  return { ...query, [key]: cleared, page: 1 }
 }
 
 export function isSearchTermTooShort(term: string) {
@@ -509,102 +505,6 @@ export function dealListPager({
       ? `Страница ${page} пуста — вернитесь к первой странице`
       : `Страница ${page} · показано ${shown} из ${total}`,
   }
-}
-
-/* ------------------------------------------------------------------ *
- * Validation feedback
- * ------------------------------------------------------------------ */
-
-/**
- * Zod's structural messages are English ("Invalid input: expected string,
- * received undefined"); only the business rules written into the contracts are
- * Russian. Every message the owner can see has to be Russian, so structural
- * issues are translated here, at the form boundary, while an authored contract
- * message is passed through untouched.
- *
- * The two are told apart by looking for Cyrillic in the message rather than by
- * issue code: a contract can attach its own text to any code, and a global Zod
- * error map would reach every other consumer of this package.
- */
-export function toRussianMessage(issue: z.core.$ZodIssue): string {
-  if (/[А-Яа-яЁё]/.test(issue.message)) return issue.message
-
-  switch (issue.code) {
-    case 'invalid_type':
-      return 'Заполните поле'
-    case 'too_small': {
-      const minimum = Number(issue.minimum)
-      if (issue.origin === 'string') {
-        return minimum <= 1
-          ? 'Заполните поле'
-          : `Слишком короткое значение: не меньше ${minimum} символов`
-      }
-      return `Значение не может быть меньше ${minimum}`
-    }
-    case 'too_big': {
-      const maximum = Number(issue.maximum)
-      return issue.origin === 'string'
-        ? `Слишком длинное значение: не больше ${maximum} символов`
-        : `Значение не может быть больше ${maximum}`
-    }
-    case 'invalid_format':
-      switch (issue.format) {
-        case 'datetime':
-          return 'Укажите дату и время'
-        case 'date':
-          return 'Укажите дату'
-        case 'url':
-          return 'Укажите ссылку вида https://example.com'
-        case 'uuid':
-          return 'Недопустимый идентификатор'
-        default:
-          return 'Недопустимый формат'
-      }
-    case 'invalid_value':
-      return 'Выберите значение из списка'
-    case 'unrecognized_keys':
-      return 'Недопустимое поле'
-    default:
-      return 'Недопустимое значение'
-  }
-}
-
-/**
- * First message per field, ready to render next to the input.
- *
- * Nested paths are published twice — as `initialTask.dueAt` and as
- * `initialTask` — so a form can point at the exact input when it renders the
- * subfields, and still fall back to one message beside a grouped control.
- */
-export function dealFormFieldErrors(
-  issues: ReadonlyArray<z.core.$ZodIssue>,
-): Record<string, string> {
-  const errors: Record<string, string> = {}
-  for (const issue of issues) {
-    const path = issue.path.filter((part): part is string => typeof part === 'string')
-    const message = toRussianMessage(issue)
-    const keys = path.length === 0 ? ['_form'] : [path.join('.'), path[0]!]
-    for (const key of keys) {
-      if (errors[key]) continue
-      errors[key] = message
-    }
-  }
-  return errors
-}
-
-/**
- * Live phone feedback while the field is being typed. It mirrors the contract's
- * own length bounds instead of guessing at a national format: the server
- * normalizes the number, and a stricter client rule would reject numbers the
- * API accepts.
- */
-export function phoneFieldError(value: string): string | null {
-  const trimmed = value.trim()
-  if (!trimmed) return 'Заполните поле'
-  if (!/^\+?[\d\s()-]+$/.test(trimmed)) return 'Номер может содержать только цифры'
-  if (trimmed.length < 7) return 'Слишком короткий номер'
-  if (trimmed.length > 40) return 'Слишком длинный номер'
-  return null
 }
 
 /* ------------------------------------------------------------------ *

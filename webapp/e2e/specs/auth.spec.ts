@@ -235,7 +235,7 @@ test('keeps one logical browser session active across concurrent tabs', async ({
     })
   })
   await logoutFromAccountMenu(page)
-  await expect(page.getByRole('alert')).toContainText('Logout failed')
+  await expect(page.getByRole('alert')).toContainText('Не удалось выйти')
 
   await logoutFromAccountMenu(secondPage)
   await expect(secondPage.getByRole('button', { name: 'Login' })).toBeVisible()
@@ -343,13 +343,16 @@ test('concurrent account changes converge every tab on the winning cookie sessio
     .not.toBe('')
 })
 
-/** Profile moved out of the sidebar into the account menu when the CRM took it over. */
+/**
+ * Profile moved out of the sidebar into the account menu when the CRM took it
+ * over, and the CRM's shell chrome is Russian.
+ */
 async function openAccountPage(page: Page) {
-  await page.getByRole('button', { name: 'Open account menu' }).click()
-  await page.getByRole('menuitem', { name: 'Account' }).click()
+  await page.getByRole('button', { name: 'Открыть меню аккаунта' }).click()
+  await page.getByRole('menuitem', { name: 'Профиль' }).click()
 }
 
 async function logoutFromAccountMenu(page: Page) {
-  await page.getByRole('button', { name: 'Open account menu' }).click()
-  await page.getByRole('menuitem', { name: 'Log out' }).click()
+  await page.getByRole('button', { name: 'Открыть меню аккаунта' }).click()
+  await page.getByRole('menuitem', { name: 'Выйти' }).click()
 }

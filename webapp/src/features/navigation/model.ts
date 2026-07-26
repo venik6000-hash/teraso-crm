@@ -1,6 +1,6 @@
-import type { UserRole } from '@teraso-crm/contracts'
+import { APP_PATH_PREFIX, dealPath, type UserRole } from '@teraso-crm/contracts'
 
-export type UserRoutePath =
+export type CrmRoutePath =
   | '/app'
   | '/app/dashboard'
   | '/app/deals'
@@ -10,66 +10,71 @@ export type UserRoutePath =
   | '/app/profile'
   | '/app/settings'
 export type AdminRoutePath = '/admin' | '/admin/users' | '/admin/settings'
-export type WorkspaceRoutePath = UserRoutePath | AdminRoutePath
+export type WorkspaceRoutePath = CrmRoutePath | AdminRoutePath
 
 /**
- * The workspace sidebar.
+ * The two workspaces, which are deliberately not the two roles.
  *
- * The user workspace *is* the CRM (PRD 7.0: navigation on the left on desktop,
- * in a sheet on a phone), so it lists the CRM sections rather than the template's
- * demo pages. Profile stays reachable from the account menu, and the workspace
- * root `/app` from the sidebar header, so nothing became unreachable.
+ * `/app` is the product: PRD 3 gives the MVP a single руководитель with full
+ * access, Task 6 writes notifications for every account regardless of role, and
+ * the deal card is the destination stored in those notifications — so the CRM
+ * requires authentication, not a particular role. `/admin` is the template's
+ * account console and stays administrator-only.
  *
- * The admin workspace is the platform console — accounts and roles — and is
- * deliberately unchanged and still English.
+ * Reading access from the workspace rather than from the role is what keeps the
+ * seeded administrator — the only account a fresh deployment has — from being
+ * bounced out of the product it exists to run.
  */
-const navigationByRole = {
-  user: [
-    { label: 'Дашборд', to: '/app/dashboard' },
-    { label: 'Сделки', to: '/app/deals' },
-    { label: 'Воронка', to: '/app/board' },
-    { label: 'Задачи', to: '/app/tasks' },
-    { label: 'Уведомления', to: '/app/notifications' },
-    { label: 'Настройки', to: '/app/settings' },
-  ],
-  admin: [
-    { label: 'Dashboard', to: '/admin' },
-    { label: 'Users', to: '/admin/users' },
-    { label: 'Settings', to: '/admin/settings' },
-  ],
-} as const satisfies Record<UserRole, ReadonlyArray<{ label: string; to: WorkspaceRoutePath }>>
+export type WorkspaceKind = 'crm' | 'admin'
 
-/**
- * Reachable destinations that are not sidebar entries: the workspace root and
- * the account page, both still linked from the shell.
- */
-const extraPathsByRole = {
-  user: ['/app', '/app/profile'],
-  admin: [],
-} as const satisfies Record<UserRole, ReadonlyArray<WorkspaceRoutePath>>
+const crmNavigation = [
+  { label: 'Дашборд', to: '/app/dashboard' },
+  { label: 'Сделки', to: '/app/deals' },
+  { label: 'Воронка', to: '/app/board' },
+  { label: 'Задачи', to: '/app/tasks' },
+  { label: 'Уведомления', to: '/app/notifications' },
+  { label: 'Настройки', to: '/app/settings' },
+] as const satisfies ReadonlyArray<{ label: string; to: WorkspaceRoutePath }>
 
-/**
- * Dynamic destinations a signed-in user may be returned to after logging in.
- *
- * The deal card is here because a notification links straight at it: without
- * this, following a push while signed out would drop the owner on the workspace
- * root instead of the deal the alert was about. The pattern stays anchored and
- * shape-checked so it can never widen into an open redirect.
- */
-const returnablePathPatterns: Record<UserRole, ReadonlyArray<RegExp>> = {
-  user: [/^\/app\/deals\/[0-9a-fA-F-]{36}$/],
-  admin: [],
+const adminNavigation = [
+  { label: 'Dashboard', to: '/admin' },
+  { label: 'Users', to: '/admin/users' },
+  { label: 'Settings', to: '/admin/settings' },
+] as const satisfies ReadonlyArray<{ label: string; to: WorkspaceRoutePath }>
+
+/** Reachable destinations that are not sidebar entries but are still linked. */
+const crmExtraPaths = ['/app', '/app/profile'] as const satisfies ReadonlyArray<CrmRoutePath>
+
+const UUID_PATTERN = /^[0-9a-fA-F-]{36}$/
+const DEAL_PATH_PREFIX = dealPath('')
+
+export function canOpenWorkspace(workspace: WorkspaceKind, role: UserRole) {
+  return workspace === 'crm' || role === 'admin'
 }
 
-function isKnownWorkspacePath(role: UserRole, pathname: string) {
-  return (
-    navigationItemsForRole(role).some((item) => item.to === pathname) ||
-    extraPathsByRole[role].some((path) => path === pathname)
-  )
+export function workspaceForPath(pathname: string): WorkspaceKind {
+  return pathname === APP_PATH_PREFIX || pathname.startsWith(`${APP_PATH_PREFIX}/`)
+    ? 'crm'
+    : 'admin'
 }
 
-export function navigationItemsForRole(role: UserRole) {
-  return navigationByRole[role]
+/**
+ * The sidebar for a workspace.
+ *
+ * Each workspace links to the other one the account may open, so an
+ * administrator crosses between the CRM and the account console without having
+ * to type a URL.
+ */
+export function navigationItemsForWorkspace(
+  workspace: WorkspaceKind,
+  role: UserRole,
+): ReadonlyArray<{ label: string; to: WorkspaceRoutePath }> {
+  if (workspace === 'crm') {
+    return role === 'admin'
+      ? [...crmNavigation, { label: 'Администрирование', to: '/admin' }]
+      : crmNavigation
+  }
+  return [...adminNavigation, { label: 'CRM', to: '/app/deals' }]
 }
 
 export function homePathForRole(role: UserRole): '/app' | '/admin' {
@@ -85,6 +90,16 @@ export function resolveRoleDestination(
     : homePathForRole(role)
 }
 
+/**
+ * Where a signed-in account may be returned to after logging in.
+ *
+ * The deal card is included because a notification links straight at it:
+ * without it, following a push while signed out would drop the owner on the
+ * workspace root instead of the deal the alert was about. The destination is
+ * rebuilt from the contract's own `dealPath` so this file cannot become a
+ * second spelling of it, and the identifier is shape-checked so the rule can
+ * never widen into an open redirect.
+ */
 export function safeReturnPath(role: UserRole, value: string | undefined): string | null {
   if (!value || !value.startsWith('/') || value.startsWith('//')) return null
 
@@ -96,8 +111,23 @@ export function safeReturnPath(role: UserRole, value: string | undefined): strin
   }
   if (url.origin !== 'https://app.invalid') return null
 
-  const isKnown =
-    isKnownWorkspacePath(role, url.pathname) ||
-    returnablePathPatterns[role].some((pattern) => pattern.test(url.pathname))
+  const isKnown = isKnownWorkspacePath(role, url.pathname) || isDealPath(url.pathname)
   return isKnown ? `${url.pathname}${url.search}` : null
+}
+
+function isDealPath(pathname: string) {
+  return (
+    pathname.startsWith(DEAL_PATH_PREFIX) &&
+    UUID_PATTERN.test(pathname.slice(DEAL_PATH_PREFIX.length))
+  )
+}
+
+function isKnownWorkspacePath(role: UserRole, pathname: string) {
+  const workspace = workspaceForPath(pathname)
+  if (!canOpenWorkspace(workspace, role)) return false
+
+  return (
+    navigationItemsForWorkspace(workspace, role).some((item) => item.to === pathname) ||
+    (workspace === 'crm' && crmExtraPaths.some((path) => path === pathname))
+  )
 }

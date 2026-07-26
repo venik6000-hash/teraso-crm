@@ -27,15 +27,18 @@ import {
 } from '@/components/ui/sidebar'
 import { Typography } from '@/components/typography'
 import type { WorkspaceRoutePath } from '@/features/navigation'
+import type { ShellLabels } from './AppSidebar'
 import { DashboardLink } from './DashboardLink'
 
 export function NavUser({
   accountPath,
+  labels,
   onLogout,
   settingsPath,
   user,
 }: {
   accountPath?: WorkspaceRoutePath
+  labels: ShellLabels
   onLogout: () => Promise<void>
   settingsPath: WorkspaceRoutePath
   user: UserDto
@@ -61,7 +64,7 @@ export function NavUser({
     <>
       {logoutError && (
         <Typography role="alert" variant="caption" tone="destructive">
-          Logout failed. Please try again.
+          {labels.logoutFailed}
         </Typography>
       )}
       <SidebarMenu>
@@ -69,7 +72,7 @@ export function NavUser({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <SidebarMenuButton
-                aria-label="Open account menu"
+                aria-label={labels.openAccountMenu}
                 size="lg"
                 tooltip={user.displayName ?? user.email}
                 className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
@@ -128,14 +131,14 @@ export function NavUser({
                   <DropdownMenuItem asChild>
                     <DashboardLink to={accountPath}>
                       <HugeiconsIcon icon={UserCircle02Icon} strokeWidth={2} />
-                      Account
+                      {labels.accountItem}
                     </DashboardLink>
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem asChild>
                   <DashboardLink to={settingsPath}>
                     <HugeiconsIcon icon={Settings01Icon} strokeWidth={2} />
-                    Settings
+                    {labels.settingsItem}
                   </DashboardLink>
                 </DropdownMenuItem>
               </DropdownMenuGroup>
@@ -146,7 +149,7 @@ export function NavUser({
                 variant="destructive"
               >
                 <HugeiconsIcon icon={Logout01Icon} strokeWidth={2} />
-                {logoutPending ? 'Logging out…' : 'Log out'}
+                {logoutPending ? labels.logoutPending : labels.logoutItem}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

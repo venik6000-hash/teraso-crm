@@ -28,7 +28,12 @@ import {
   CrmTasksPage,
   DEAL_DETAIL_ROUTE_PATH,
 } from '@/features/crm'
-import { homePathForRole, safeReturnPath } from '@/features/navigation'
+import {
+  canOpenWorkspace,
+  homePathForRole,
+  safeReturnPath,
+  type WorkspaceKind,
+} from '@/features/navigation'
 import { UserHome, UserProfile, UserSettings } from '@/features/users'
 
 export function HomePage() {
@@ -97,8 +102,7 @@ export function ResetPasswordPage() {
 }
 
 export function UserHomePage() {
-  const user = useWorkspaceUser('user')
-  return <UserHome user={user} />
+  return <UserHome user={useWorkspaceUser()} />
 }
 
 export function CrmDashboardRoutePage() {
@@ -134,8 +138,7 @@ export function CrmNotificationsRoutePage() {
 }
 
 export function UserProfilePage() {
-  const user = useWorkspaceUser('user')
-  return <UserProfile user={user} />
+  return <UserProfile user={useWorkspaceUser()} />
 }
 
 export function UserSettingsPage() {
@@ -148,21 +151,19 @@ export function AdminDashboardPage() {
 }
 
 export function AdminUsersPage() {
-  const user = useWorkspaceUser('admin')
-  return <AdminUsers currentUser={user} />
+  return <AdminUsers currentUser={useWorkspaceUser('admin')} />
 }
 
 export function AdminSettingsPage() {
-  const user = useWorkspaceUser('admin')
-  return <AdminSettings user={user} />
+  return <AdminSettings user={useWorkspaceUser('admin')} />
 }
 
 export function UserWorkspaceLayout() {
-  return <WorkspaceRoute role="user" />
+  return <WorkspaceRoute workspace="crm" />
 }
 
 export function AdminWorkspaceLayout() {
-  return <WorkspaceRoute role="admin" />
+  return <WorkspaceRoute workspace="admin" />
 }
 
 export function NotFoundPage() {
@@ -177,7 +178,14 @@ export function NotFoundPage() {
   return <NotFoundSection destination={destination} />
 }
 
-function WorkspaceRoute({ role }: { role: UserRole }) {
+/**
+ * The guard is per workspace, not per role: the CRM asks only for a signed-in
+ * account, the account console still asks for an administrator. Gating `/app`
+ * on `role === 'user'` locked the seeded administrator — the only account a
+ * fresh deployment has — out of the product, and made every notification link
+ * it receives a dead one.
+ */
+function WorkspaceRoute({ workspace }: { workspace: WorkspaceKind }) {
   const auth = useAuth()
   const location = useLocation()
 
@@ -189,12 +197,12 @@ function WorkspaceRoute({ role }: { role: UserRole }) {
     const returnTo = `${location.pathname}${location.searchStr}`
     return <HrefRedirect href={`/login?returnTo=${encodeURIComponent(returnTo)}`} />
   }
-  if (auth.user.role !== role) {
+  if (!canOpenWorkspace(workspace, auth.user.role)) {
     return <HrefRedirect href={homePathForRole(auth.user.role)} />
   }
 
   return (
-    <WorkspaceShell onLogout={auth.logout} user={auth.user}>
+    <WorkspaceShell onLogout={auth.logout} user={auth.user} workspace={workspace}>
       <Outlet />
     </WorkspaceShell>
   )
@@ -246,10 +254,11 @@ function usePasswordResetToken() {
   return token
 }
 
-function useWorkspaceUser(role: UserRole): UserDto {
+/** Asserts the guarded layout above actually ran; `role` narrows it further. */
+function useWorkspaceUser(role?: UserRole): UserDto {
   const user = useAuth().user
-  if (!user || user.role !== role) {
-    throw new Error(`${role} workspace page rendered outside its guarded layout`)
+  if (!user || (role && user.role !== role)) {
+    throw new Error('Workspace page rendered outside its guarded layout')
   }
   return user
 }

@@ -5,6 +5,7 @@ import {
   Home01Icon,
   Notification03Icon,
   Settings01Icon,
+  ShieldKeyIcon,
   Task01Icon,
   UserGroupIcon,
   UserIcon,
@@ -16,12 +17,13 @@ import type { PropsWithChildren } from 'react'
 import {
   AppSidebar,
   type DashboardNavigationItem,
+  type ShellLabels,
   SiteHeader,
 } from '@/components/dashboard'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import {
-  homePathForRole,
-  navigationItemsForRole,
+  navigationItemsForWorkspace,
+  type WorkspaceKind,
 } from '@/features/navigation'
 
 const iconsByPath = {
@@ -38,6 +40,37 @@ const iconsByPath = {
   '/admin/settings': Settings01Icon,
 } as const
 
+/**
+ * The shell chrome speaks the language of the workspace it frames: the CRM is
+ * the owner-facing Russian product, the account console is the template's
+ * English administration area. One shell serves both, so the strings travel
+ * with the workspace instead of being hard-coded inside the sidebar.
+ */
+const labelsByWorkspace = {
+  crm: {
+    accountItem: 'Профиль',
+    fallbackTitle: 'Teraso CRM',
+    logoutFailed: 'Не удалось выйти. Попробуйте ещё раз.',
+    logoutItem: 'Выйти',
+    logoutPending: 'Выходим…',
+    navigationGroup: 'Разделы',
+    openAccountMenu: 'Открыть меню аккаунта',
+    settingsItem: 'Настройки',
+    workspaceLabel: 'CRM Teraso',
+  },
+  admin: {
+    accountItem: 'Account',
+    fallbackTitle: 'Dashboard',
+    logoutFailed: 'Logout failed. Please try again.',
+    logoutItem: 'Log out',
+    logoutPending: 'Logging out…',
+    navigationGroup: 'Workspace',
+    openAccountMenu: 'Open account menu',
+    settingsItem: 'Settings',
+    workspaceLabel: 'Admin workspace',
+  },
+} as const satisfies Record<WorkspaceKind, ShellLabels>
+
 function getSidebarDefaultOpen() {
   const persistedState = document.cookie
     .split('; ')
@@ -51,36 +84,39 @@ export function WorkspaceShell({
   children,
   onLogout,
   user,
+  workspace,
 }: PropsWithChildren<{
   onLogout: () => Promise<void>
   user: UserDto
+  workspace: WorkspaceKind
 }>) {
   const pathname = useLocation({ select: (location) => location.pathname })
-  const navigationItems = navigationItemsForRole(user.role)
+  const navigationItems = navigationItemsForWorkspace(workspace, user.role)
   const activeItem = navigationItems.find((item) => item.to === pathname)
-  const homePath = homePathForRole(user.role)
-  const settingsPath = user.role === 'admin' ? '/admin/settings' : '/app/settings'
+  const labels = labelsByWorkspace[workspace]
+  const homePath = workspace === 'admin' ? '/admin' : '/app'
+  const settingsPath = workspace === 'admin' ? '/admin/settings' : '/app/settings'
   const items: ReadonlyArray<DashboardNavigationItem> = navigationItems.map((item) => ({
     ...item,
-    icon: iconsByPath[item.to],
+    // The cross-workspace link is the one entry whose icon depends on where it
+    // is shown rather than on where it points.
+    icon: item.to === '/admin' && workspace === 'crm' ? ShieldKeyIcon : iconsByPath[item.to],
     isActive: item.to === pathname,
   }))
 
   return (
     <SidebarProvider defaultOpen={getSidebarDefaultOpen()}>
       <AppSidebar
-        accountPath={user.role === 'user' ? '/app/profile' : undefined}
+        accountPath={workspace === 'crm' ? '/app/profile' : undefined}
         homePath={homePath}
         items={items}
+        labels={labels}
         onLogout={onLogout}
         settingsPath={settingsPath}
         user={user}
-        workspaceLabel={user.role === 'admin' ? 'Admin workspace' : 'CRM Teraso'}
       />
       <SidebarInset>
-        <SiteHeader
-          title={activeItem?.label ?? (user.role === 'admin' ? 'Dashboard' : 'Teraso CRM')}
-        />
+        <SiteHeader title={activeItem?.label ?? labels.fallbackTitle} />
         <div className="flex min-w-0 flex-1 flex-col">{children}</div>
       </SidebarInset>
     </SidebarProvider>

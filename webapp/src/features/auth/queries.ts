@@ -17,6 +17,30 @@ export const sessionQueryKeys = {
   all: ['session'] as const,
 }
 
+/**
+ * Cache roots that must not outlive the session that filled them.
+ *
+ * `sessionQueryKeys.all` covers everything keyed *inside* it, which is why the
+ * admin keys were deliberately rooted there. Product features key outside it —
+ * the CRM at `['crm']`, Task 8's notifications at `['notifications']` — so
+ * without this list the next account signing in is served the previous one's
+ * deal rows, client names and phone numbers straight from cache, and with a
+ * 30-second `staleTime` it keeps rendering them while it revalidates.
+ *
+ * Anything keyed outside `['session']` belongs here on the day it is added.
+ */
+const evictedQueryRoots = [
+  sessionQueryKeys.all,
+  ['crm'],
+  ['notifications'],
+] as const satisfies ReadonlyArray<ReadonlyArray<string>>
+
+function evictSessionScopedQueries(queryClient: QueryClient) {
+  for (const queryKey of evictedQueryRoots) {
+    queryClient.removeQueries({ queryKey })
+  }
+}
+
 export const authQueryKeys = {
   all: [...sessionQueryKeys.all, 'auth'] as const,
   me: () => [...authQueryKeys.all, 'me'] as const,
@@ -91,7 +115,7 @@ export function applyAuthenticatedSession(
   setAccessToken: (accessToken: string | null) => void,
   response: CookieAuthResponse,
 ) {
-  queryClient.removeQueries({ queryKey: sessionQueryKeys.all })
+  evictSessionScopedQueries(queryClient)
   setAccessToken(response.accessToken)
   queryClient.setQueryData(authQueryKeys.me(), { user: response.user } satisfies MeResponse)
 }
@@ -101,5 +125,5 @@ export async function clearAuthenticatedSession(
   setAccessToken: (accessToken: string | null) => void,
 ) {
   setAccessToken(null)
-  queryClient.removeQueries({ queryKey: sessionQueryKeys.all })
+  evictSessionScopedQueries(queryClient)
 }

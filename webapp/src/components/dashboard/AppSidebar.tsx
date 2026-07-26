@@ -16,22 +16,40 @@ import { DashboardLink } from './DashboardLink'
 import { NavMain, type DashboardNavigationItem } from './NavMain'
 import { NavUser } from './NavUser'
 
+/**
+ * User-visible chrome strings, supplied by the shell.
+ *
+ * The sidebar is shared by the Russian CRM and the English account console, so
+ * the wording belongs to the workspace being framed, not to this component.
+ */
+export type ShellLabels = {
+  accountItem: string
+  fallbackTitle: string
+  logoutFailed: string
+  logoutItem: string
+  logoutPending: string
+  navigationGroup: string
+  openAccountMenu: string
+  settingsItem: string
+  workspaceLabel: string
+}
+
 export function AppSidebar({
   accountPath,
   homePath,
   items,
+  labels,
   onLogout,
   settingsPath,
   user,
-  workspaceLabel,
 }: {
   accountPath?: WorkspaceRoutePath
   homePath: WorkspaceRoutePath
   items: ReadonlyArray<DashboardNavigationItem>
+  labels: ShellLabels
   onLogout: () => Promise<void>
   settingsPath: WorkspaceRoutePath
   user: UserDto
-  workspaceLabel: string
 }) {
   return (
     <Sidebar collapsible="icon" variant="inset">
@@ -41,14 +59,14 @@ export function AppSidebar({
             <SidebarMenuButton asChild size="lg" tooltip="Teraso CRM">
               <DashboardLink to={homePath}>
                 <span className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                  <Typography variant="control">W</Typography>
+                  <Typography variant="control">T</Typography>
                 </span>
                 <span className="grid min-w-0 gap-0.5">
                   <Typography variant="control" truncate>
                     Teraso CRM
                   </Typography>
                   <Typography variant="caption" tone="muted" truncate>
-                    {workspaceLabel}
+                    {labels.workspaceLabel}
                   </Typography>
                 </span>
               </DashboardLink>
@@ -57,11 +75,12 @@ export function AppSidebar({
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={items} />
+        <NavMain groupLabel={labels.navigationGroup} items={items} />
       </SidebarContent>
       <SidebarFooter>
         <NavUser
           accountPath={accountPath}
+          labels={labels}
           onLogout={onLogout}
           settingsPath={settingsPath}
           user={user}

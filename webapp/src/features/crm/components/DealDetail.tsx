@@ -64,7 +64,7 @@ export function DealDetail({
   deal: DealDetailDto
   error?: Error | null
   isSaving: boolean
-  onAddNote: (text: string) => void
+  onAddNote: (text: string) => Promise<unknown>
   onChangeStage: (input: DealStageChangeInput) => void
   onSaveNote: (note: string | null) => void
   onUpdateDeal: (input: DealUpdateInput) => void
@@ -239,9 +239,11 @@ export function DealDetail({
       </div>
 
       <div className="grid gap-6">
+        {/* Deliberately not keyed on `updatedAt`: a refetch — including the
+            push-driven invalidation Task 8 adds — must not wipe a note the
+            owner is halfway through typing. */}
         <CurrentNoteCard
           isSaving={isSaving}
-          key={deal.updatedAt}
           note={deal.currentNote}
           onSaveNote={onSaveNote}
         />
@@ -389,34 +391,56 @@ function CurrentNoteCard({
   )
 }
 
+/**
+ * The composer clears only after the entry is actually recorded, and reports a
+ * failure next to the box the text is still sitting in. Clearing optimistically
+ * threw away whatever the owner had typed and announced the problem at the far
+ * end of the card.
+ */
 function NoteComposer({
   isSaving,
   onAddNote,
 }: {
   isSaving: boolean
-  onAddNote: (text: string) => void
+  onAddNote: (text: string) => Promise<unknown>
 }) {
   const [text, setText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async () => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    setError(null)
+    try {
+      await onAddNote(trimmed)
+      setText('')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Не удалось добавить запись')
+    }
+  }
 
   return (
     <form
       className="grid gap-3"
       onSubmit={(event) => {
         event.preventDefault()
-        const trimmed = text.trim()
-        if (!trimmed) return
-        onAddNote(trimmed)
-        setText('')
+        void submit()
       }}
     >
       <Textarea
         aria-label="Новая запись в ленте"
+        aria-invalid={error ? true : undefined}
         maxLength={4000}
         onChange={(event) => setText(event.target.value)}
         placeholder="Что произошло по сделке"
         rows={2}
         value={text}
       />
+      {error && (
+        <Typography role="alert" variant="caption" tone="destructive">
+          {error}
+        </Typography>
+      )}
       <div className="flex justify-end">
         <Button disabled={isSaving || text.trim() === ''} size="sm" type="submit" variant="outline">
           <Typography variant="control">Добавить в ленту</Typography>

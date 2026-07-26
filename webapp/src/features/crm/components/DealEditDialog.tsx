@@ -6,8 +6,9 @@ import {
   type DealDetailDto,
   type DealUpdateInput,
 } from '@teraso-crm/contracts'
-import { useState, type ReactNode } from 'react'
+import { useState } from 'react'
 
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -19,23 +20,15 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Typography } from '@/components/typography'
 import {
   DEAL_FIELD_LABELS,
   LEAD_CLASS_LABELS,
   MATERIAL_LABELS,
   PREFERRED_CHANNEL_LABELS,
-  dealFormFieldErrors,
 } from '../model'
+import { emptyFormErrors, toFormErrors } from '../validation'
+import { CrmSelectField, CrmTextField } from './CrmField'
 
 /**
  * Edits the working fields of a deal (PRD 7.1: «Все поля редактируемы»).
@@ -50,6 +43,16 @@ import {
 
 /** Radix `Select` cannot carry an empty value, so "not set" needs a sentinel. */
 const NOT_SET = '__not_set__'
+
+function enumOptions<TOption extends string>(
+  options: ReadonlyArray<TOption>,
+  labels: Record<TOption, string>,
+) {
+  return [
+    { label: 'Не задано', value: NOT_SET },
+    ...options.map((option) => ({ label: labels[option], value: option })),
+  ]
+}
 
 type DraftState = {
   name: string
@@ -95,7 +98,7 @@ export function DealEditDialog({
   const initial = toDraft(deal)
   const [isOpen, setIsOpen] = useState(false)
   const [draft, setDraft] = useState(initial)
-  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [errors, setErrors] = useState(emptyFormErrors)
 
   const set = (field: keyof DraftState, value: string) =>
     setDraft((current) => ({ ...current, [field]: value }))
@@ -109,17 +112,17 @@ export function DealEditDialog({
     }
 
     if (Object.keys(changed).length === 0) {
-      setErrors({ _form: 'Изменений нет' })
+      setErrors({ fields: {}, formMessage: 'Изменений нет' })
       return
     }
 
     const parsed = dealUpdateSchema.safeParse(changed)
     if (!parsed.success) {
-      setErrors(dealFormFieldErrors(parsed.error.issues))
+      setErrors(toFormErrors(parsed.error.issues))
       return
     }
 
-    setErrors({})
+    setErrors(emptyFormErrors)
     setIsOpen(false)
     onSubmit(parsed.data)
   }
@@ -139,94 +142,86 @@ export function DealEditDialog({
           </DialogDescription>
         </DialogHeader>
 
+        {errors.formMessage && (
+          <Alert variant="destructive">
+            <AlertTitle>Изменения не сохранены</AlertTitle>
+            <AlertDescription>{errors.formMessage}</AlertDescription>
+          </Alert>
+        )}
+
         <div className="grid gap-4 sm:grid-cols-2">
-          <TextField
-            error={errors.name}
-            id="deal-name"
+          <CrmTextField
+            error={errors.fields.name}
             label={DEAL_FIELD_LABELS.name}
             onChange={(value) => set('name', value)}
             value={draft.name}
           />
-          <TextField
-            error={errors.source}
-            id="deal-source"
+          <CrmTextField
+            error={errors.fields.source}
             label={DEAL_FIELD_LABELS.source}
             onChange={(value) => set('source', value)}
             value={draft.source}
           />
-          <TextField
-            error={errors.form}
-            id="deal-form"
+          <CrmTextField
+            error={errors.fields.form}
             label={DEAL_FIELD_LABELS.form}
             onChange={(value) => set('form', value)}
             value={draft.form}
           />
-          <TextField
-            error={errors.landingUrl}
-            id="deal-landing-url"
+          <CrmTextField
+            error={errors.fields.landingUrl}
             label={DEAL_FIELD_LABELS.landingUrl}
             onChange={(value) => set('landingUrl', value)}
             placeholder="https://teraso.com.ua/..."
             value={draft.landingUrl}
           />
-          <EnumField
-            error={errors.leadClass}
-            id="deal-lead-class"
+          <CrmSelectField
+            error={errors.fields.leadClass}
             label={DEAL_FIELD_LABELS.leadClass}
-            labels={LEAD_CLASS_LABELS}
             onChange={(value) => set('leadClass', value)}
-            options={leadClassSchema.options}
+            options={enumOptions(leadClassSchema.options, LEAD_CLASS_LABELS)}
             value={draft.leadClass}
           />
-          <EnumField
-            error={errors.material}
-            id="deal-material"
+          <CrmSelectField
+            error={errors.fields.material}
             label={DEAL_FIELD_LABELS.material}
-            labels={MATERIAL_LABELS}
             onChange={(value) => set('material', value)}
-            options={materialSchema.options}
+            options={enumOptions(materialSchema.options, MATERIAL_LABELS)}
             value={draft.material}
           />
-          <TextField
-            error={errors.areaLabel}
-            id="deal-area"
+          <CrmTextField
+            error={errors.fields.areaLabel}
             label={DEAL_FIELD_LABELS.areaLabel}
             onChange={(value) => set('areaLabel', value)}
             value={draft.areaLabel}
           />
-          <TextField
-            error={errors.budgetLabel}
-            id="deal-budget"
+          <CrmTextField
+            error={errors.fields.budgetLabel}
             label={DEAL_FIELD_LABELS.budgetLabel}
             onChange={(value) => set('budgetLabel', value)}
             value={draft.budgetLabel}
           />
-          <TextField
-            error={errors.objectType}
-            id="deal-object-type"
+          <CrmTextField
+            error={errors.fields.objectType}
             label={DEAL_FIELD_LABELS.objectType}
             onChange={(value) => set('objectType', value)}
             value={draft.objectType}
           />
-          <TextField
-            error={errors.needTiming}
-            id="deal-need-timing"
+          <CrmTextField
+            error={errors.fields.needTiming}
             label={DEAL_FIELD_LABELS.needTiming}
             onChange={(value) => set('needTiming', value)}
             value={draft.needTiming}
           />
-          <EnumField
-            error={errors.preferredChannel}
-            id="deal-channel"
+          <CrmSelectField
+            error={errors.fields.preferredChannel}
             label={DEAL_FIELD_LABELS.preferredChannel}
-            labels={PREFERRED_CHANNEL_LABELS}
             onChange={(value) => set('preferredChannel', value)}
-            options={preferredChannelSchema.options}
+            options={enumOptions(preferredChannelSchema.options, PREFERRED_CHANNEL_LABELS)}
             value={draft.preferredChannel}
           />
-          <TextField
-            error={errors.potentialAmount}
-            id="deal-potential-amount"
+          <CrmTextField
+            error={errors.fields.potentialAmount}
             inputMode="decimal"
             label={DEAL_FIELD_LABELS.potentialAmount}
             onChange={(value) => set('potentialAmount', value)}
@@ -234,12 +229,6 @@ export function DealEditDialog({
             value={draft.potentialAmount}
           />
         </div>
-
-        {errors._form && (
-          <Typography role="alert" variant="caption" tone="destructive">
-            {errors._form}
-          </Typography>
-        )}
 
         <DialogFooter>
           <DialogClose asChild>
@@ -253,96 +242,5 @@ export function DealEditDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function TextField({
-  error,
-  id,
-  inputMode,
-  label,
-  onChange,
-  placeholder,
-  value,
-}: {
-  error?: string
-  id: string
-  inputMode?: 'decimal'
-  label: string
-  onChange: (value: string) => void
-  placeholder?: string
-  value: string
-}) {
-  return (
-    <FieldShell error={error} id={id} label={label}>
-      <Input
-        aria-invalid={error ? true : undefined}
-        id={id}
-        inputMode={inputMode}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        value={value}
-      />
-    </FieldShell>
-  )
-}
-
-function EnumField<TOption extends string>({
-  error,
-  id,
-  label,
-  labels,
-  onChange,
-  options,
-  value,
-}: {
-  error?: string
-  id: string
-  label: string
-  labels: Record<TOption, string>
-  onChange: (value: string) => void
-  options: ReadonlyArray<TOption>
-  value: string
-}) {
-  return (
-    <FieldShell error={error} id={id} label={label}>
-      <Select onValueChange={onChange} value={value}>
-        <SelectTrigger id={id}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={NOT_SET}>Не задано</SelectItem>
-          {options.map((option) => (
-            <SelectItem key={option} value={option}>
-              {labels[option]}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </FieldShell>
-  )
-}
-
-function FieldShell({
-  children,
-  error,
-  id,
-  label,
-}: {
-  children: ReactNode
-  error?: string
-  id: string
-  label: string
-}) {
-  return (
-    <div className="grid gap-2">
-      <Label htmlFor={id}>{label}</Label>
-      {children}
-      {error && (
-        <Typography role="alert" variant="caption" tone="destructive">
-          {error}
-        </Typography>
-      )}
-    </div>
   )
 }

@@ -75,9 +75,13 @@ export function NextStepBadge({
 
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
+      {/* The kind stays visible when the task is late: whether to call or to
+          write is the one thing needed to act on an overdue row. */}
       <Badge variant={isOverdue ? 'destructive' : 'secondary'}>
         <Typography variant="controlXs">
-          {isOverdue ? 'Просрочено' : TASK_KIND_LABELS[task.kind]}
+          {isOverdue
+            ? `${TASK_KIND_LABELS[task.kind]} · просрочено`
+            : TASK_KIND_LABELS[task.kind]}
         </Typography>
       </Badge>
       <Typography variant="caption" tone="muted" wrap="nowrap">

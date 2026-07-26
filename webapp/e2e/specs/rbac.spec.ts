@@ -42,7 +42,15 @@ test('keeps user and administrator workspaces separate', async ({ browser, page 
   await expect(adminPage.getByRole('link', { name: 'Users' })).toBeVisible()
   await expect(adminPage.getByRole('link', { name: 'Settings' })).toBeVisible()
   await expect(adminPage.getByRole('link', { name: 'Home' })).toHaveCount(0)
+  // The CRM is the product and asks only for a session: the seeded
+  // administrator must be able to open it, because it is the only account a
+  // fresh deployment has and every notification links into it.
+  await adminPage.getByRole('link', { name: 'CRM' }).click()
+  await expect(adminPage).toHaveURL(/\/app\/deals$/)
+  await expect(adminPage.getByRole('heading', { level: 1, name: 'Сделки' })).toBeVisible()
   await adminPage.goto('/app/profile')
+  await expect(adminPage).toHaveURL(/\/app\/profile$/)
+  await adminPage.getByRole('link', { name: 'Администрирование' }).click()
   await expect(adminPage).toHaveURL(/\/admin$/)
 
   await adminContext.close()
@@ -184,13 +192,13 @@ test('workspace account menu keeps a failed logout visible and retryable', async
   await page.locator('[data-sidebar="trigger"]').click()
   await expect(sidebar).toHaveAttribute('data-state', 'collapsed')
   await page.locator('[data-sidebar="footer"] [data-sidebar="menu-button"]').click()
-  await page.getByRole('menuitem', { name: 'Log out' }).click()
+  await page.getByRole('menuitem', { name: 'Выйти' }).click()
 
   await expect(sidebar).toHaveAttribute('data-state', 'expanded')
-  await expect(page.getByRole('alert')).toHaveText('Logout failed. Please try again.')
+  await expect(page.getByRole('alert')).toHaveText('Не удалось выйти. Попробуйте ещё раз.')
   await expect(page).toHaveURL(/\/app$/)
   await page.locator('[data-sidebar="footer"] [data-sidebar="menu-button"]').click()
-  await expect(page.getByRole('menuitem', { name: 'Log out' })).toBeEnabled()
+  await expect(page.getByRole('menuitem', { name: 'Выйти' })).toBeEnabled()
 })
 
 test('role mutation failures are announced inside the confirmation dialog', async ({

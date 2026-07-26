@@ -49,8 +49,12 @@ export function CommandSearch() {
   }, [])
 
   const trimmed = term.trim()
+  // The palette is mounted in the header of every CRM screen, so an ungated
+  // query would fetch a page of deals on each route and refetch it after every
+  // mutation. It searches only while it is open.
   const deals = useDealListQuery(
     parseDealListSearch({ q: trimmed, pageSize: 8, sort: 'submittedAt' }),
+    { enabled: isOpen },
   )
   const results = trimmed.length >= MIN_DEAL_SEARCH_LENGTH ? (deals.data?.items ?? []) : []
 

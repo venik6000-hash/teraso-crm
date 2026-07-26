@@ -1,9 +1,12 @@
 export {
+  canOpenWorkspace,
   homePathForRole,
-  navigationItemsForRole,
+  navigationItemsForWorkspace,
   resolveRoleDestination,
   safeReturnPath,
+  workspaceForPath,
   type AdminRoutePath,
-  type UserRoutePath,
+  type CrmRoutePath,
+  type WorkspaceKind,
   type WorkspaceRoutePath,
 } from './model'

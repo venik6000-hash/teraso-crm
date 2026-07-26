@@ -6,10 +6,5 @@ export {
   NotificationsPage as CrmNotificationsPage,
   TasksPage as CrmTasksPage,
 } from './pages'
-export { crmQueryKeys } from './queries'
-export {
-  CRM_PATHS,
-  DEAL_DETAIL_ROUTE_PATH,
-  cleanDealListSearch,
-  dealHref,
-} from './model'
+export { crmInvalidatedRoots, crmQueryKeys } from './queries'
+export { DEAL_DETAIL_ROUTE_PATH, cleanDealListSearch } from './model'

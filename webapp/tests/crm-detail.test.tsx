@@ -16,12 +16,8 @@ import { ActivityTimeline } from '../src/features/crm/components/ActivityTimelin
 import { ContactActions } from '../src/features/crm/components/ContactActions'
 import { DealDetail } from '../src/features/crm/components/DealDetail'
 import { DealForm } from '../src/features/crm/components/DealForm'
-import {
-  contactLinks,
-  dealFormFieldErrors,
-  phoneFieldError,
-  safeExternalHref,
-} from '../src/features/crm/model'
+import { contactLinks, safeExternalHref } from '../src/features/crm/model'
+import { phoneFieldError, toFormErrors } from '../src/features/crm/validation'
 import { renderInRouter } from './render-in-router'
 
 const DEAL_ID = '11111111-1111-4111-8111-111111111111'
@@ -102,6 +98,7 @@ function detail(overrides: Partial<DealDetailDto> = {}): DealDetailDto {
 }
 
 const noop = () => undefined
+const asyncNoop = async () => undefined
 
 /* ------------------------------------------------------------------ *
  * Validation feedback is Russian, including Zod's structural messages
@@ -111,12 +108,13 @@ test('an empty manual deal reports missing fields in Russian, not in Zod English
   const parsed = dealCreateSchema.safeParse({})
   expect(parsed.success).toBe(false)
 
-  const errors = dealFormFieldErrors(parsed.error!.issues)
+  const errors = toFormErrors(parsed.error!.issues)
 
-  expect(errors.name).toBe('Заполните поле')
-  expect(errors.phone).toBe('Заполните поле')
-  expect(errors.source).toBe('Заполните поле')
-  for (const message of Object.values(errors)) {
+  expect(errors.fields.name).toBe('Заполните поле')
+  expect(errors.fields.phone).toBe('Заполните поле')
+  expect(errors.fields.source).toBe('Заполните поле')
+  expect(errors.formMessage).toBeNull()
+  for (const message of Object.values(errors.fields)) {
     expect(message).not.toContain('Invalid input')
     expect(message).toMatch(/[А-Яа-яЁё]/)
   }
@@ -141,11 +139,39 @@ test('structural Zod failures are translated while contract messages stay as aut
     potentialAmount: '65 000 грн',
   })
 
-  expect(dealFormFieldErrors(tooLong.error!.issues).name).toBe('Слишком длинное значение: не больше 120 символов')
-  expect(dealFormFieldErrors(badDate.error!.issues).submittedAt).toBe('Укажите дату и время')
-  expect(dealFormFieldErrors(badAmount.error!.issues).potentialAmount).toBe(
+  expect(toFormErrors(tooLong.error!.issues).fields.name).toBe(
+    'Слишком длинное значение: не больше 120 символов',
+  )
+  expect(toFormErrors(badDate.error!.issues).fields.submittedAt).toBe('Укажите дату и время')
+  expect(toFormErrors(badAmount.error!.issues).fields.potentialAmount).toBe(
     'Укажите сумму в формате 65000.00',
   )
+})
+
+test('a nested failure is reported both at the exact field and at its group', () => {
+  const badTask = dealCreateSchema.safeParse({
+    name: 'Олена',
+    phone: '+380671234567',
+    source: 'quiz',
+    initialTask: { kind: 'CALL', title: 'Перезвонить', dueAt: 'завтра' },
+  })
+
+  const errors = toFormErrors(badTask.error!.issues)
+  expect(errors.fields['initialTask.dueAt']).toBe('Укажите дату и время')
+  expect(errors.fields.initialTask).toBe('Укажите дату и время')
+})
+
+test('a failure with no field is surfaced separately so a form cannot drop it', () => {
+  const unknownField = dealCreateSchema.safeParse({
+    name: 'Олена',
+    phone: '+380671234567',
+    source: 'quiz',
+    nonsense: true,
+  })
+
+  const errors = toFormErrors(unknownField.error!.issues)
+  expect(errors.formMessage).toBe('Недопустимое поле')
+  expect(Object.keys(errors.fields)).toEqual([])
 })
 
 test('the phone field is checked as it is typed', () => {
@@ -160,7 +186,7 @@ test('the phone field is checked as it is typed', () => {
  * ------------------------------------------------------------------ */
 
 test('a matching phone warns about the existing client without blocking the form', async () => {
-  const markup = await renderInRouter(
+  const warned = await renderInRouter(
     <DealForm
       existingClient={{ client: client(), openDeal: summary({ id: OTHER_DEAL_ID }) }}
       isPending={false}
@@ -169,13 +195,24 @@ test('a matching phone warns about the existing client without blocking the form
       submitError={null}
     />,
   )
+  const submitting = await renderInRouter(
+    <DealForm
+      existingClient={{ client: client(), openDeal: summary({ id: OTHER_DEAL_ID }) }}
+      isPending
+      onCancel={noop}
+      onSubmit={noop}
+      submitError={null}
+    />,
+  )
 
-  expect(markup).toContain('Клиент с этим номером уже есть')
-  expect(markup).toContain('Олена Ковальчук')
-  expect(markup).toContain(`href="${dealPath(OTHER_DEAL_ID)}"`)
-  // The warning informs, it does not block: nothing on the form is disabled.
-  // (`disabled` on its own also appears inside Tailwind variant class names.)
-  expect(markup).not.toContain('disabled=""')
+  expect(warned).toContain('Клиент с этим номером уже есть')
+  expect(warned).toContain('Олена Ковальчук')
+  expect(warned).toContain(`href="${dealPath(OTHER_DEAL_ID)}"`)
+  // The warning informs, it does not block. The differential against the
+  // pending render is what makes this meaningful: `disabled` on its own also
+  // appears inside Tailwind variant class names.
+  expect(warned).not.toContain('disabled=""')
+  expect(submitting).toContain('disabled=""')
 })
 
 test('an unknown phone shows no duplicate warning', async () => {
@@ -201,9 +238,10 @@ test('the deal card shows the PRD blocks with a readable phone and formatted mon
     <DealDetail
       deal={detail()}
       isSaving={false}
-      onAddNote={noop}
+      onAddNote={asyncNoop}
       onChangeStage={noop}
       onSaveNote={noop}
+      onUpdateDeal={noop}
     />,
   )
 
@@ -234,9 +272,10 @@ test('raw click identifiers stay out of the operational header', async () => {
         },
       })}
       isSaving={false}
-      onAddNote={noop}
+      onAddNote={asyncNoop}
       onChangeStage={noop}
       onSaveNote={noop}
+      onUpdateDeal={noop}
     />,
   )
 
@@ -251,9 +290,10 @@ test('a truncated history says so instead of pretending it is complete', async (
     <DealDetail
       deal={detail({ hasMoreActivities: true })}
       isSaving={false}
-      onAddNote={noop}
+      onAddNote={asyncNoop}
       onChangeStage={noop}
       onSaveNote={noop}
+      onUpdateDeal={noop}
     />,
   )
 
@@ -265,27 +305,30 @@ test('a closed deal offers a reopen action and an open deal does not', async () 
     <DealDetail
       deal={detail({ stage: 'WON', fullPaymentAmount: '65000.00', fullPaymentPaidAt: '2026-07-25T09:00:00.000Z' })}
       isSaving={false}
-      onAddNote={noop}
+      onAddNote={asyncNoop}
       onChangeStage={noop}
       onSaveNote={noop}
+      onUpdateDeal={noop}
     />,
   )
   const lost = await renderInRouter(
     <DealDetail
       deal={detail({ stage: 'LOST', lossReason: 'NO_ANSWER' })}
       isSaving={false}
-      onAddNote={noop}
+      onAddNote={asyncNoop}
       onChangeStage={noop}
       onSaveNote={noop}
+      onUpdateDeal={noop}
     />,
   )
   const open = await renderInRouter(
     <DealDetail
       deal={detail()}
       isSaving={false}
-      onAddNote={noop}
+      onAddNote={asyncNoop}
       onChangeStage={noop}
       onSaveNote={noop}
+      onUpdateDeal={noop}
     />,
   )
 
@@ -357,9 +400,10 @@ test('a deal whose landing URL carries a script scheme renders it as plain text'
     <DealDetail
       deal={detail({ landingUrl: 'javascript:alert(1)' })}
       isSaving={false}
-      onAddNote={noop}
+      onAddNote={asyncNoop}
       onChangeStage={noop}
       onSaveNote={noop}
+      onUpdateDeal={noop}
     />,
   )
 

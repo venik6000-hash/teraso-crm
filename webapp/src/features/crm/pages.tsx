@@ -107,6 +107,7 @@ export function DealsPage({ search }: { search: Partial<DealListQuery> }) {
     >
       <DealFilterBar
         currentUserId={auth.user?.id}
+        knownSources={distinct(deals.data?.items.map((deal) => deal.source))}
         onChange={applyQuery}
         query={query}
       />
@@ -233,9 +234,10 @@ export function DealPage({ dealId }: { dealId: string }) {
           deal={deal.data}
           error={error}
           isSaving={isSaving}
-          onAddNote={(text) =>
-            addNote.mutate({ text }, { onSuccess: () => toast.success('Запись добавлена') })
-          }
+          onAddNote={async (text) => {
+            await addNote.mutateAsync({ text })
+            toast.success('Запись добавлена')
+          }}
           onChangeStage={(input) =>
             changeStage.mutate(input, { onSuccess: () => toast.success('Этап изменён') })
           }
@@ -343,6 +345,16 @@ function CrmPlaceholderPage({
       </Empty>
     </CrmPage>
   )
+}
+
+/**
+ * `source` is matched exactly by the server, so the values on the loaded page
+ * are offered as suggestions. It is not the full vocabulary — there is no
+ * endpoint for that — which is why the filter also states the rule.
+ * `needTiming` gets no suggestions: it is not on the list DTO.
+ */
+function distinct(values: ReadonlyArray<string | null | undefined> | undefined) {
+  return [...new Set((values ?? []).filter((value): value is string => Boolean(value)))].sort()
 }
 
 function ListLoading() {

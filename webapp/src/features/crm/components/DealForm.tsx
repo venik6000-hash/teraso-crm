@@ -8,22 +8,13 @@ import {
   type ClientLookupResponse,
   type DealCreateInput,
 } from '@teraso-crm/contracts'
-import { useState, type ReactNode } from 'react'
+import { useId, useState } from 'react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
 import { Typography } from '@/components/typography'
 import {
   DEAL_DETAIL_ROUTE_PATH,
@@ -32,11 +23,11 @@ import {
   MATERIAL_LABELS,
   PREFERRED_CHANNEL_LABELS,
   TASK_KIND_LABELS,
-  dealFormFieldErrors,
   formatPhone,
-  phoneFieldError,
   toInstantFromKyivInput,
 } from '../model'
+import { emptyFormErrors, phoneFieldError, toFormErrors } from '../validation'
+import { CrmSelectField, CrmTextField, CrmTextareaField } from './CrmField'
 
 /**
  * Manual deal creation (PRD 7.1).
@@ -89,7 +80,8 @@ export function DealForm({
   const [taskKind, setTaskKind] = useState<string>('CALL')
   const [taskTitle, setTaskTitle] = useState('')
   const [taskDueAt, setTaskDueAt] = useState('')
-  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [errors, setErrors] = useState(emptyFormErrors)
+  const withTaskId = useId()
 
   const livePhoneError = phoneTouched ? phoneFieldError(phone) : null
   const duplicate = existingClient?.client ?? null
@@ -122,11 +114,11 @@ export function DealForm({
 
     const parsed = dealCreateSchema.safeParse(payload)
     if (!parsed.success) {
-      setErrors(dealFormFieldErrors(parsed.error.issues))
+      setErrors(toFormErrors(parsed.error.issues))
       return
     }
 
-    setErrors({})
+    setErrors(emptyFormErrors)
     onSubmit(parsed.data)
   }
 
@@ -138,10 +130,12 @@ export function DealForm({
         submit()
       }}
     >
-      {submitError && (
+      {(submitError || errors.formMessage) && (
         <Alert variant="destructive">
           <AlertTitle>Сделка не создана</AlertTitle>
-          <AlertDescription>{submitError.message}</AlertDescription>
+          <AlertDescription>
+            {submitError?.message ?? errors.formMessage}
+          </AlertDescription>
         </Alert>
       )}
 
@@ -153,16 +147,14 @@ export function DealForm({
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 sm:grid-cols-2">
-            <TextField
-              error={errors.name}
-              id="new-deal-name"
+            <CrmTextField
+              error={errors.fields.name}
               label={DEAL_FIELD_LABELS.name}
               onChange={setName}
               value={name}
             />
-            <TextField
-              error={livePhoneError ?? errors.phone}
-              id="new-deal-phone"
+            <CrmTextField
+              error={livePhoneError ?? errors.fields.phone}
               inputMode="tel"
               label={DEAL_FIELD_LABELS.phone}
               onBlur={() => {
@@ -229,41 +221,34 @@ export function DealForm({
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 sm:grid-cols-2">
-            <TextField
-              error={errors.source}
-              id="new-deal-source"
+            <CrmTextField
+              error={errors.fields.source}
               label={DEAL_FIELD_LABELS.source}
               onChange={setSource}
               placeholder="Звонок, Instagram, рекомендация"
               value={source}
             />
-            <TextField
-              error={errors.form}
-              id="new-deal-form"
+            <CrmTextField
+              error={errors.fields.form}
               label={DEAL_FIELD_LABELS.form}
               onChange={setForm}
               value={form}
             />
-            <TextField
-              error={errors.landingUrl}
-              id="new-deal-landing-url"
+            <CrmTextField
+              error={errors.fields.landingUrl}
               label={DEAL_FIELD_LABELS.landingUrl}
               onChange={setLandingUrl}
               placeholder="https://teraso.com.ua/..."
               value={landingUrl}
             />
-            <FieldShell
-              error={errors.submittedAt}
-              id="new-deal-submitted-at"
+            <CrmTextField
+              description="Время по Киеву; пусто — сейчас"
+              error={errors.fields.submittedAt}
               label={DEAL_FIELD_LABELS.submittedAt}
-            >
-              <Input
-                id="new-deal-submitted-at"
-                onChange={(event) => setSubmittedAt(event.target.value)}
-                type="datetime-local"
-                value={submittedAt}
-              />
-            </FieldShell>
+              onChange={setSubmittedAt}
+              type="datetime-local"
+              value={submittedAt}
+            />
           </div>
         </CardContent>
       </Card>
@@ -276,61 +261,50 @@ export function DealForm({
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 sm:grid-cols-2">
-            <EnumField
-              id="new-deal-lead-class"
+            <CrmSelectField
               label={DEAL_FIELD_LABELS.leadClass}
-              labels={LEAD_CLASS_LABELS}
               onChange={setLeadClass}
-              options={leadClassSchema.options}
+              options={enumOptions(leadClassSchema.options, LEAD_CLASS_LABELS)}
               value={leadClass}
             />
-            <EnumField
-              id="new-deal-material"
+            <CrmSelectField
               label={DEAL_FIELD_LABELS.material}
-              labels={MATERIAL_LABELS}
               onChange={setMaterial}
-              options={materialSchema.options}
+              options={enumOptions(materialSchema.options, MATERIAL_LABELS)}
               value={material}
             />
-            <TextField
-              error={errors.areaLabel}
-              id="new-deal-area"
+            <CrmTextField
+              error={errors.fields.areaLabel}
               label={DEAL_FIELD_LABELS.areaLabel}
               onChange={setAreaLabel}
               value={areaLabel}
             />
-            <TextField
-              error={errors.budgetLabel}
-              id="new-deal-budget"
+            <CrmTextField
+              error={errors.fields.budgetLabel}
               label={DEAL_FIELD_LABELS.budgetLabel}
               onChange={setBudgetLabel}
               value={budgetLabel}
             />
-            <TextField
-              error={errors.objectType}
-              id="new-deal-object-type"
+            <CrmTextField
+              error={errors.fields.objectType}
               label={DEAL_FIELD_LABELS.objectType}
               onChange={setObjectType}
               value={objectType}
             />
-            <TextField
-              error={errors.needTiming}
-              id="new-deal-need-timing"
+            <CrmTextField
+              error={errors.fields.needTiming}
               label={DEAL_FIELD_LABELS.needTiming}
               onChange={setNeedTiming}
               value={needTiming}
             />
-            <EnumField
-              id="new-deal-channel"
+            <CrmSelectField
               label={DEAL_FIELD_LABELS.preferredChannel}
-              labels={PREFERRED_CHANNEL_LABELS}
               onChange={setPreferredChannel}
-              options={preferredChannelSchema.options}
+              options={enumOptions(preferredChannelSchema.options, PREFERRED_CHANNEL_LABELS)}
               value={preferredChannel}
             />
-            <TextField
-              error={errors.potentialAmount}
-              id="new-deal-potential-amount"
+            <CrmTextField
+              error={errors.fields.potentialAmount}
               inputMode="decimal"
               label={DEAL_FIELD_LABELS.potentialAmount}
               onChange={setPotentialAmount}
@@ -339,19 +313,14 @@ export function DealForm({
             />
           </div>
           <div className="pt-4">
-            <FieldShell
-              error={errors.currentNote}
-              id="new-deal-note"
+            <CrmTextareaField
+              error={errors.fields.currentNote}
               label={DEAL_FIELD_LABELS.currentNote}
-            >
-              <Textarea
-                id="new-deal-note"
-                maxLength={500}
-                onChange={(event) => setCurrentNote(event.target.value)}
-                rows={2}
-                value={currentNote}
-              />
-            </FieldShell>
+              maxLength={500}
+              onChange={setCurrentNote}
+              rows={2}
+              value={currentNote}
+            />
           </div>
         </CardContent>
       </Card>
@@ -367,41 +336,36 @@ export function DealForm({
             <div className="flex items-center gap-2">
               <Checkbox
                 checked={withTask}
-                id="new-deal-with-task"
+                id={withTaskId}
                 onCheckedChange={(checked) => setWithTask(checked === true)}
               />
-              <Label htmlFor="new-deal-with-task">Сразу назначить следующий шаг</Label>
+              <Label htmlFor={withTaskId}>Сразу назначить следующий шаг</Label>
             </div>
             {withTask && (
               <div className="grid gap-4 sm:grid-cols-3">
-                <EnumField
-                  id="new-deal-task-kind"
+                <CrmSelectField
                   label="Тип задачи"
-                  labels={TASK_KIND_LABELS}
                   onChange={setTaskKind}
-                  options={taskKindSchema.options}
+                  options={taskKindSchema.options.map((option) => ({
+                    label: TASK_KIND_LABELS[option],
+                    value: option,
+                  }))}
                   value={taskKind}
-                  withNotSet={false}
                 />
-                <TextField
-                  error={errors['initialTask.title'] ?? errors.initialTask}
-                  id="new-deal-task-title"
+                <CrmTextField
+                  error={errors.fields['initialTask.title'] ?? errors.fields.initialTask}
                   label="Что сделать"
                   onChange={setTaskTitle}
                   value={taskTitle}
                 />
-                <FieldShell
-                  error={errors['initialTask.dueAt']}
-                  id="new-deal-task-due"
+                <CrmTextField
+                  description="Время по Киеву"
+                  error={errors.fields['initialTask.dueAt']}
                   label="Срок"
-                >
-                  <Input
-                    id="new-deal-task-due"
-                    onChange={(event) => setTaskDueAt(event.target.value)}
-                    type="datetime-local"
-                    value={taskDueAt}
-                  />
-                </FieldShell>
+                  onChange={setTaskDueAt}
+                  type="datetime-local"
+                  value={taskDueAt}
+                />
               </div>
             )}
           </div>
@@ -420,96 +384,13 @@ export function DealForm({
   )
 }
 
-function TextField({
-  error,
-  id,
-  inputMode,
-  label,
-  onBlur,
-  onChange,
-  placeholder,
-  value,
-}: {
-  error?: string | null
-  id: string
-  inputMode?: 'decimal' | 'tel'
-  label: string
-  onBlur?: () => void
-  onChange: (value: string) => void
-  placeholder?: string
-  value: string
-}) {
-  return (
-    <FieldShell error={error} id={id} label={label}>
-      <Input
-        aria-invalid={error ? true : undefined}
-        id={id}
-        inputMode={inputMode}
-        onBlur={onBlur}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        value={value}
-      />
-    </FieldShell>
-  )
-}
-
-function EnumField<TOption extends string>({
-  id,
-  label,
-  labels,
-  onChange,
-  options,
-  value,
-  withNotSet = true,
-}: {
-  id: string
-  label: string
-  labels: Record<TOption, string>
-  onChange: (value: string) => void
-  options: ReadonlyArray<TOption>
-  value: string
-  withNotSet?: boolean
-}) {
-  return (
-    <FieldShell id={id} label={label}>
-      <Select onValueChange={onChange} value={value}>
-        <SelectTrigger id={id}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {withNotSet && <SelectItem value={NOT_SET}>Не задано</SelectItem>}
-          {options.map((option) => (
-            <SelectItem key={option} value={option}>
-              {labels[option]}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </FieldShell>
-  )
-}
-
-function FieldShell({
-  children,
-  error,
-  id,
-  label,
-}: {
-  children: ReactNode
-  error?: string | null
-  id: string
-  label: string
-}) {
-  return (
-    <div className="grid gap-2">
-      <Label htmlFor={id}>{label}</Label>
-      {children}
-      {error && (
-        <Typography role="alert" variant="caption" tone="destructive">
-          {error}
-        </Typography>
-      )}
-    </div>
-  )
+/** Radix `Select` cannot carry an empty value, so "not set" needs a sentinel. */
+function enumOptions<TOption extends string>(
+  options: ReadonlyArray<TOption>,
+  labels: Record<TOption, string>,
+) {
+  return [
+    { label: 'Не задано', value: NOT_SET },
+    ...options.map((option) => ({ label: labels[option], value: option })),
+  ]
 }

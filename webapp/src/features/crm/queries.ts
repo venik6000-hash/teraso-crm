@@ -33,6 +33,7 @@ export const crmQueryKeys = {
   deal: (dealId: string) => ['crm', 'deal', dealId] as const,
   board: (filters: DealBoardQuery) => ['crm', 'board', filters] as const,
   dashboard: (period: DashboardPeriod) => ['crm', 'dashboard', period] as const,
+  clientLookup: (phone: string) => ['crm', 'client-lookup', phone] as const,
 }
 
 /**
@@ -44,33 +45,47 @@ export const crmQueryKeys = {
  * the exact keys means a mutation does not have to know which filter
  * combination the owner happens to be looking at.
  *
+ * `client-lookup` is in the list for a sharper reason than tidiness: creating a
+ * deal for a new number and immediately opening the form again with the same
+ * number would otherwise be answered from cache with "no such client" for the
+ * next thirty seconds — the duplicate guard failing in exactly the window where
+ * double entry is most likely.
+ *
  * `notifications` is the root Task 8's notification feature keys under.
  */
-const INVALIDATED_ROOTS = [
+export const crmInvalidatedRoots = [
   ['crm', 'deals'],
   ['crm', 'deal'],
   ['crm', 'board'],
   ['crm', 'dashboard'],
+  ['crm', 'client-lookup'],
   ['notifications'],
-] as const
+] as const satisfies ReadonlyArray<ReadonlyArray<string>>
 
 function useInvalidateCrm() {
   const queryClient = useQueryClient()
   return () =>
     Promise.all(
-      INVALIDATED_ROOTS.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+      crmInvalidatedRoots.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
     )
 }
 
-export function useDealListQuery(filters: DealListQuery) {
+export function useDealListQuery(
+  filters: DealListQuery,
+  options: { enabled?: boolean } = {},
+) {
   const auth = useAuth()
   const term = filters.q?.trim() ?? ''
   return useQuery({
     queryKey: crmQueryKeys.deals(filters),
     queryFn: () => listDeals(auth.transport, filters),
     // A two-character term matches every Ukrainian phone number, so the list
-    // waits for a term long enough to mean something.
-    enabled: term.length === 0 || term.length >= MIN_DEAL_SEARCH_LENGTH,
+    // waits for a term long enough to mean something. `options.enabled` lets a
+    // caller add its own condition — the command palette only searches while it
+    // is open — without being able to bypass that rule.
+    enabled:
+      (options.enabled ?? true) &&
+      (term.length === 0 || term.length >= MIN_DEAL_SEARCH_LENGTH),
   })
 }
 
@@ -91,7 +106,7 @@ export function useClientLookupQuery(phone: string) {
   const auth = useAuth()
   const trimmed = phone.trim()
   return useQuery({
-    queryKey: ['crm', 'client-lookup', trimmed] as const,
+    queryKey: crmQueryKeys.clientLookup(trimmed),
     queryFn: () => lookupClient(auth.transport, trimmed),
     enabled: trimmed.length >= 7 && trimmed.length <= 40,
   })

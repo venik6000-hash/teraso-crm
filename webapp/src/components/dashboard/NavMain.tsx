@@ -21,14 +21,16 @@ export type DashboardNavigationItem = {
 }
 
 export function NavMain({
+  groupLabel,
   items,
 }: {
+  groupLabel: string
   items: ReadonlyArray<DashboardNavigationItem>
 }) {
   return (
     <nav aria-label="Primary navigation">
       <SidebarGroup>
-        <SidebarGroupLabel>Workspace</SidebarGroupLabel>
+        <SidebarGroupLabel>{groupLabel}</SidebarGroupLabel>
         <SidebarGroupContent>
           <SidebarMenu>
             {items.map((item) => (
