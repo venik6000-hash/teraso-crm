@@ -39,9 +39,9 @@ test('registers, restores the session, opens protected UI, and logs out', async 
   await expect(page.getByRole('main')).toHaveCount(1)
   await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible()
   await expect(page.getByRole('heading', { level: 1, name: `Welcome, ${displayName}` })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Home' })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Profile' })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Settings' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Сделки' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Задачи' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Настройки' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Dashboard' })).toHaveCount(0)
   await expect(page.getByRole('link', { name: 'Users' })).toHaveCount(0)
   await expect(page.getByRole('main').getByText(email, { exact: true })).toBeVisible()
@@ -69,7 +69,7 @@ test('registers, restores the session, opens protected UI, and logs out', async 
   await expect((await meAfterReload).status()).toBe(200)
   await expect(page.getByRole('heading', { name: `Welcome, ${displayName}` })).toBeVisible()
 
-  await page.getByRole('link', { name: 'Profile' }).click()
+  await openAccountPage(page)
   await expect(page.getByLabel('Email')).toHaveAttribute('readonly', '')
   await page.getByLabel('Display name').fill(' A ')
   await expect(page.getByText('Display name must be at least 2 characters.')).toBeVisible()
@@ -81,7 +81,7 @@ test('registers, restores the session, opens protected UI, and logs out', async 
   await page.reload()
   await expect(page.getByLabel('Display name')).toHaveValue('Updated Web User')
 
-  await page.getByRole('link', { name: 'Settings' }).click()
+  await page.getByRole('link', { name: 'Настройки' }).click()
   await page.getByLabel('Theme').click()
   await page.getByRole('option', { name: 'Dark' }).click()
   await expect(page.locator('html')).toHaveClass(/dark/)
@@ -113,7 +113,7 @@ test('registers, restores the session, opens protected UI, and logs out', async 
   await expect(page).toHaveURL(/\/app\/settings$/)
   await expect(page.locator('html')).toHaveClass(/dark/)
 
-  await page.getByRole('link', { name: 'Profile' }).click()
+  await openAccountPage(page)
 
   await logoutFromAccountMenu(page)
   await expect(page.getByRole('button', { name: 'Login' })).toBeVisible()
@@ -342,6 +342,12 @@ test('concurrent account changes converge every tab on the winning cookie sessio
     })
     .not.toBe('')
 })
+
+/** Profile moved out of the sidebar into the account menu when the CRM took it over. */
+async function openAccountPage(page: Page) {
+  await page.getByRole('button', { name: 'Open account menu' }).click()
+  await page.getByRole('menuitem', { name: 'Account' }).click()
+}
 
 async function logoutFromAccountMenu(page: Page) {
   await page.getByRole('button', { name: 'Open account menu' }).click()

@@ -1,7 +1,11 @@
 import {
+  Analytics01Icon,
+  ChartBarLineIcon,
   DashboardSquare01Icon,
   Home01Icon,
+  Notification03Icon,
   Settings01Icon,
+  Task01Icon,
   UserGroupIcon,
   UserIcon,
 } from '@hugeicons/core-free-icons'
@@ -22,6 +26,11 @@ import {
 
 const iconsByPath = {
   '/app': Home01Icon,
+  '/app/dashboard': Analytics01Icon,
+  '/app/deals': DashboardSquare01Icon,
+  '/app/board': ChartBarLineIcon,
+  '/app/tasks': Task01Icon,
+  '/app/notifications': Notification03Icon,
   '/app/profile': UserIcon,
   '/app/settings': Settings01Icon,
   '/admin': DashboardSquare01Icon,
@@ -66,11 +75,11 @@ export function WorkspaceShell({
         onLogout={onLogout}
         settingsPath={settingsPath}
         user={user}
-        workspaceLabel={user.role === 'admin' ? 'Admin workspace' : 'User workspace'}
+        workspaceLabel={user.role === 'admin' ? 'Admin workspace' : 'CRM Teraso'}
       />
       <SidebarInset>
         <SiteHeader
-          title={activeItem?.label ?? (user.role === 'admin' ? 'Dashboard' : 'Home')}
+          title={activeItem?.label ?? (user.role === 'admin' ? 'Dashboard' : 'Teraso CRM')}
         />
         <div className="flex min-w-0 flex-1 flex-col">{children}</div>
       </SidebarInset>

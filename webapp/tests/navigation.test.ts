@@ -9,9 +9,12 @@ import {
 
 test('role navigation exposes only the current workspace', () => {
   expect(navigationItemsForRole('user')).toEqual([
-    { label: 'Home', to: '/app' },
-    { label: 'Profile', to: '/app/profile' },
-    { label: 'Settings', to: '/app/settings' },
+    { label: 'Дашборд', to: '/app/dashboard' },
+    { label: 'Сделки', to: '/app/deals' },
+    { label: 'Воронка', to: '/app/board' },
+    { label: 'Задачи', to: '/app/tasks' },
+    { label: 'Уведомления', to: '/app/notifications' },
+    { label: 'Настройки', to: '/app/settings' },
   ])
   expect(navigationItemsForRole('admin')).toEqual([
     { label: 'Dashboard', to: '/admin' },
@@ -36,4 +39,13 @@ test('return paths accept only known internal destinations for the current role'
   expect(safeReturnPath('admin', 'https://attacker.example/admin')).toBeNull()
   expect(safeReturnPath('admin', '//attacker.example/admin')).toBeNull()
   expect(safeReturnPath('user', '/app/unknown')).toBeNull()
+})
+
+test('a notification deep link survives the sign-in round trip', () => {
+  const dealPath = '/app/deals/11111111-1111-4111-8111-111111111111'
+
+  expect(safeReturnPath('user', dealPath)).toBe(dealPath)
+  expect(safeReturnPath('admin', dealPath)).toBeNull()
+  expect(safeReturnPath('user', '/app/deals/not-a-uuid')).toBeNull()
+  expect(safeReturnPath('user', '/app/deals/11111111-1111-4111-8111-111111111111/x')).toBeNull()
 })

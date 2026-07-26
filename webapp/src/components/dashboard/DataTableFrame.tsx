@@ -14,9 +14,11 @@ export function DataTableFrame({
   children,
   description,
   nextDisabled,
+  nextLabel = 'Next',
   onNext,
   onPrevious,
   previousDisabled,
+  previousLabel = 'Previous',
   summary,
   title,
   toolbar,
@@ -24,9 +26,12 @@ export function DataTableFrame({
   children: ReactNode
   description?: string
   nextDisabled: boolean
+  /** The workspace is English and the CRM is Russian; both share this frame. */
+  nextLabel?: string
   onNext: () => void
   onPrevious: () => void
   previousDisabled: boolean
+  previousLabel?: string
   summary: string
   title: string
   toolbar?: ReactNode
@@ -60,7 +65,7 @@ export function DataTableFrame({
             type="button"
             variant="outline"
           >
-            Previous
+            {previousLabel}
           </Button>
           <Button
             disabled={nextDisabled}
@@ -68,7 +73,7 @@ export function DataTableFrame({
             type="button"
             variant="outline"
           >
-            Next
+            {nextLabel}
           </Button>
         </div>
       </CardFooter>

@@ -1,4 +1,4 @@
-import { Outlet, useLocation, useRouter, useSearch } from '@tanstack/react-router'
+import { Outlet, useLocation, useParams, useRouter, useSearch } from '@tanstack/react-router'
 import type { UserDto, UserRole } from '@teraso-crm/contracts'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 
@@ -19,6 +19,15 @@ import {
   ResetPasswordForm,
   useAuth,
 } from '@/features/auth'
+import {
+  CrmBoardPage,
+  CrmDashboardPage,
+  CrmDealPage,
+  CrmDealsPage,
+  CrmNotificationsPage,
+  CrmTasksPage,
+  DEAL_DETAIL_ROUTE_PATH,
+} from '@/features/crm'
 import { homePathForRole, safeReturnPath } from '@/features/navigation'
 import { UserHome, UserProfile, UserSettings } from '@/features/users'
 
@@ -90,6 +99,38 @@ export function ResetPasswordPage() {
 export function UserHomePage() {
   const user = useWorkspaceUser('user')
   return <UserHome user={user} />
+}
+
+export function CrmDashboardRoutePage() {
+  return <CrmDashboardPage />
+}
+
+/**
+ * The CRM routes hang off the pathless `userWorkspace` layout, so their route
+ * ids carry that prefix even though their URLs do not. Reading search and
+ * params here keeps that routing detail in the routing layer: the feature
+ * components take plain props.
+ */
+export function CrmDealsRoutePage() {
+  const search = useSearch({ from: '/userWorkspace/app/deals' })
+  return <CrmDealsPage search={search} />
+}
+
+export function CrmDealRoutePage() {
+  const { dealId } = useParams({ from: `/userWorkspace${DEAL_DETAIL_ROUTE_PATH}` })
+  return <CrmDealPage dealId={dealId} />
+}
+
+export function CrmBoardRoutePage() {
+  return <CrmBoardPage />
+}
+
+export function CrmTasksRoutePage() {
+  return <CrmTasksPage />
+}
+
+export function CrmNotificationsRoutePage() {
+  return <CrmNotificationsPage />
 }
 
 export function UserProfilePage() {

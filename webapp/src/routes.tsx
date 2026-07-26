@@ -5,6 +5,7 @@ import {
   lazyRouteComponent,
 } from '@tanstack/react-router'
 
+import { cleanDealListSearch, DEAL_DETAIL_ROUTE_PATH } from './features/crm'
 import { RootLayout } from './root-layout'
 
 const rootRoute = createRootRoute({
@@ -59,6 +60,52 @@ const userHomeRoute = createRoute({
   component: lazyRouteComponent(() => import('./pages'), 'UserHomePage'),
 })
 
+const crmDashboardRoute = createRoute({
+  getParentRoute: () => userWorkspaceRoute,
+  path: '/app/dashboard',
+  component: lazyRouteComponent(() => import('./pages'), 'CrmDashboardRoutePage'),
+})
+
+/**
+ * The deals list keeps its filters, sorting and page in the URL, so a view is
+ * shareable and the back button behaves. `validateSearch` degrades a stale or
+ * hand-edited link to the default view instead of failing navigation.
+ */
+const crmDealsRoute = createRoute({
+  getParentRoute: () => userWorkspaceRoute,
+  path: '/app/deals',
+  validateSearch: (search: Record<string, unknown>) => cleanDealListSearch(search),
+  component: lazyRouteComponent(() => import('./pages'), 'CrmDealsRoutePage'),
+})
+
+/**
+ * Must stay equal to `dealPath()` from the contracts package: the backend
+ * stores that value in every notification and the service worker opens it.
+ */
+const crmDealRoute = createRoute({
+  getParentRoute: () => userWorkspaceRoute,
+  path: DEAL_DETAIL_ROUTE_PATH,
+  component: lazyRouteComponent(() => import('./pages'), 'CrmDealRoutePage'),
+})
+
+const crmBoardRoute = createRoute({
+  getParentRoute: () => userWorkspaceRoute,
+  path: '/app/board',
+  component: lazyRouteComponent(() => import('./pages'), 'CrmBoardRoutePage'),
+})
+
+const crmTasksRoute = createRoute({
+  getParentRoute: () => userWorkspaceRoute,
+  path: '/app/tasks',
+  component: lazyRouteComponent(() => import('./pages'), 'CrmTasksRoutePage'),
+})
+
+const crmNotificationsRoute = createRoute({
+  getParentRoute: () => userWorkspaceRoute,
+  path: '/app/notifications',
+  component: lazyRouteComponent(() => import('./pages'), 'CrmNotificationsRoutePage'),
+})
+
 const userProfileRoute = createRoute({
   getParentRoute: () => userWorkspaceRoute,
   path: '/app/profile',
@@ -103,6 +150,12 @@ const routeTree = rootRoute.addChildren([
   resetPasswordRoute,
   userWorkspaceRoute.addChildren([
     userHomeRoute,
+    crmDashboardRoute,
+    crmDealsRoute,
+    crmDealRoute,
+    crmBoardRoute,
+    crmTasksRoute,
+    crmNotificationsRoute,
     userProfileRoute,
     userSettingsRoute,
   ]),
