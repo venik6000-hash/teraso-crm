@@ -8,6 +8,7 @@ import { disabledEmailDelivery, type EmailDelivery } from './email/service'
 import {
   WEBHOOK_BODY_LIMIT_BYTES_DEFAULT,
   WEBHOOK_MAX_AGE_SECONDS_DEFAULT,
+  vapidConfigFrom,
   type AppEnv,
 } from './env'
 import { errorResponse, handleError, validationErrorHook } from './http/errors'
@@ -49,13 +50,8 @@ export function createApp({
     backgroundTasks,
     db: prisma,
     requireAuth: auth.requireAuth,
-    vapid: env.VAPID_PUBLIC_KEY
-      ? {
-          subject: env.VAPID_SUBJECT!,
-          publicKey: env.VAPID_PUBLIC_KEY,
-          privateKey: env.VAPID_PRIVATE_KEY!,
-        }
-      : undefined,
+    taskOverdueAfterMinutes: env.NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES,
+    vapid: vapidConfigFrom(env),
   })
   const crm = createCrmModule({
     db: prisma,

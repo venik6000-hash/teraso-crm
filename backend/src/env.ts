@@ -119,6 +119,23 @@ const envSchema = z.object({
   VAPID_SUBJECT: optionalStringSchema,
   VAPID_PUBLIC_KEY: optionalStringSchema,
   VAPID_PRIVATE_KEY: optionalStringSchema,
+  // How long an unfinished task waits past its due time before it is announced a
+  // second time as overdue. This is an operator dial rather than a product rule:
+  // the owner tunes the nagging rhythm as he uses the CRM, so it is server config
+  // read at boot — change it and restart the backend. It is bounded to a day
+  // because a longer delay would silently mean "never" inside the dispatcher's own
+  // 24-hour lookback window.
+  //
+  // Optional here and defaulted where it is consumed, exactly like the two webhook
+  // limits above: a `.default()` would make the field REQUIRED on the inferred
+  // AppEnv and force every hand-built test literal in the repository to restate a
+  // value it does not care about.
+  NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(24 * 60)
+    .optional(),
   SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().positive().max(60).default(20),
   TRUST_PROXY: booleanStringSchema,
   TRUSTED_PROXY_CLIENT_IP_HEADER: optionalHttpHeaderNameSchema,
@@ -150,6 +167,29 @@ export type AppEnv = z.infer<typeof envSchema>
 
 export function loadEnv(source: Record<string, string | undefined>) {
   return envSchema.parse(source)
+}
+
+/** The browser push signing material, or undefined when push is not configured. */
+export type VapidEnvConfig = {
+  subject: string
+  publicKey: string
+  privateKey: string
+}
+
+/**
+ * Assembles the VAPID group for the delivery adapter.
+ *
+ * It lives beside `validateVapidKeys` because it is the only place allowed to
+ * rely on that validator's all-or-nothing guarantee. Every composition root
+ * (app.ts, cron.ts) would otherwise restate the invariant with its own non-null
+ * assertions, which is the same rule written three times in three files — and the
+ * two that are not the validator would keep asserting it long after somebody
+ * relaxed the one that enforces it.
+ */
+export function vapidConfigFrom(env: AppEnv): VapidEnvConfig | undefined {
+  const { VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY } = env
+  if (!VAPID_SUBJECT || !VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return undefined
+  return { subject: VAPID_SUBJECT, publicKey: VAPID_PUBLIC_KEY, privateKey: VAPID_PRIVATE_KEY }
 }
 
 function validateWebappOrigin(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {

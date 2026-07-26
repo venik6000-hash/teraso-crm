@@ -19,7 +19,7 @@ import {
   type TaskCreateInput,
 } from '@teraso-crm/contracts'
 
-import type { DbClient } from '../../../db'
+import { isUniqueViolationOn, type DbClient } from '../../../db'
 import { Prisma } from '../../../generated/prisma/client'
 import type {
   CrmRepository,
@@ -1087,32 +1087,6 @@ function isClientPhoneConflict(error: unknown): boolean {
 /** A unique-violation on the `[source, external_id]` receipt identity. */
 function isIngestionReceiptConflict(error: unknown): boolean {
   return isUniqueViolationOn(error, 'external_id')
-}
-
-/**
- * A P2002 naming `column`, whichever spelling the driver reports. The pg driver
- * adapter this repository runs under (db.ts) leaves `meta.target` undefined and
- * reports the constraint at `meta.driverAdapterError.cause.constraint.fields`
- * instead, so an earlier target-only check silently never matched and left the
- * retry dead. Both shapes plus the message text are covered here, once, so the two
- * conflict detectors above cannot drift apart.
- */
-function isUniqueViolationOn(error: unknown, column: string): boolean {
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
-    return false
-  }
-  const fields = (
-    error.meta as { driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } } | undefined
-  )?.driverAdapterError?.cause?.constraint?.fields
-  if (Array.isArray(fields) && fields.includes(column)) return true
-
-  // Fallbacks for a client that populates meta.target or only the message text.
-  const target = (error.meta as { target?: string | string[] } | undefined)?.target
-  const targets = Array.isArray(target) ? target : target ? [target] : []
-  if (targets.some((value) => typeof value === 'string' && value.includes(column))) {
-    return true
-  }
-  return error.message.includes(column)
 }
 
 /**

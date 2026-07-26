@@ -1,3 +1,4 @@
+import { vapidConfigFrom } from './env'
 import { createNotificationService } from './modules/notifications'
 import { createBackendRuntime, type BackendRuntime } from './runtime'
 
@@ -51,13 +52,8 @@ const cronTasks = {
     const notifications = createNotificationService({
       backgroundTasks,
       db: prisma,
-      vapid: env.VAPID_PUBLIC_KEY
-        ? {
-            subject: env.VAPID_SUBJECT!,
-            publicKey: env.VAPID_PUBLIC_KEY,
-            privateKey: env.VAPID_PRIVATE_KEY!,
-          }
-        : undefined,
+      taskOverdueAfterMinutes: env.NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES,
+      vapid: vapidConfigFrom(env),
     })
     const summary = await notifications.dispatchDueEvents(now)
     console.log(

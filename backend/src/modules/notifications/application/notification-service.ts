@@ -1,5 +1,6 @@
 import {
   NEXT_STEP_GRACE_MINUTES,
+  dealPath,
   type NotificationListQuery,
   type NotificationListResponse,
   type NotificationReadRequest,
@@ -12,6 +13,7 @@ import type { TaskDeferrer } from '../../../background-tasks'
 import type { AuthenticatedPrincipal } from '../../auth'
 import type {
   Clock,
+  DeliverableNotification,
   DueTaskCondition,
   LeadNeedsActionCondition,
   NewLeadFact,
@@ -24,15 +26,17 @@ import type {
 
 /**
  * How long an unfinished task waits after its due instant before it is announced
- * a second time as overdue (PRD 7.7 lists «в точное время активной задачи» and
- * «при появлении просроченной задачи» as two distinct triggers, so they cannot
- * share one instant or every task would raise both alerts at once).
+ * a second time as overdue, when the operator has not set a value (PRD 7.7 lists
+ * «в точное время активной задачи» and «при появлении просроченной задачи» as two
+ * distinct triggers, so they cannot share one instant or every task would raise
+ * both alerts at once).
  *
- * It matches the product's 30-minute rhythm but is deliberately its own constant:
- * it is an escalation delay, not the next-step grace window of PRD 7.4, and the
- * two are free to diverge without one silently redefining the other.
+ * It is an escalation delay, deliberately NOT the next-step grace window of PRD
+ * 7.4: the two answer different questions and must be free to diverge. The owner
+ * tunes this one through NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES as he learns what
+ * rhythm suits him, so it is injected rather than fixed here.
  */
-export const TASK_OVERDUE_AFTER_MINUTES = 30
+export const DEFAULT_TASK_OVERDUE_AFTER_MINUTES = 15
 
 /**
  * How far back a dispatch run looks for conditions it has not announced yet.
@@ -48,6 +52,17 @@ export const DISPATCH_LOOKBACK_MINUTES = 24 * 60
 /** One best-effort send pass never fans out further than this. */
 const DELIVERY_BATCH_SIZE = 200
 
+/**
+ * The wall-clock ceiling on one delivery pass.
+ *
+ * Per-send timeouts bound each request, but a full batch of slow-but-answering
+ * endpoints can still add up to longer than the interval this job runs on, and a
+ * pass that outlives its own schedule is how overlap starts. Hitting the budget
+ * ends the pass cleanly; whatever was not claimed is still PENDING and the next
+ * pass picks it up.
+ */
+const DELIVERY_PASS_BUDGET_MS = 60_000
+
 const MINUTE_MS = 60_000
 
 type NotificationServiceDependencies = {
@@ -55,6 +70,8 @@ type NotificationServiceDependencies = {
   clock: Clock
   delivery: PushDelivery
   repository: NotificationRepository
+  /** Defaults to DEFAULT_TASK_OVERDUE_AFTER_MINUTES; see that constant. */
+  taskOverdueAfterMinutes?: number
 }
 
 export type DispatchSummary = {
@@ -144,9 +161,16 @@ export class NotificationService {
    * The inbox rows are awaited; the push is handed to the background task queue,
    * so a slow or dead push service cannot hold up the site's webhook response.
    * The runtime drains that queue on shutdown.
+   *
+   * The deferred send is scoped to THIS lead's event key rather than draining
+   * everything pending. A busy hour would otherwise have every inbound lead kick
+   * off a global pass over rows other passes are already sending, turning normal
+   * traffic into the concurrency the delivery claim then has to absorb — cheaper
+   * to not create the contention than to resolve it.
    */
   async newLeadRecorded(fact: NewLeadFact): Promise<void> {
     const recipients = await this.dependencies.repository.listRecipientUserIds()
+    const eventKey = `new-lead:${fact.dealId}`
 
     await this.dependencies.repository.createMany(
       recipients.map((recipientUserId) => ({
@@ -154,14 +178,14 @@ export class NotificationService {
         kind: 'NEW_LEAD' as const,
         title: 'Новая заявка',
         body: `${fact.clientName} · ${fact.source}`,
-        href: dealHref(fact.dealId),
-        eventKey: `new-lead:${fact.dealId}`,
+        href: dealPath(fact.dealId),
+        eventKey,
         dealId: fact.dealId,
       })),
     )
 
     this.dependencies.backgroundTasks.defer(async () => {
-      await this.deliverPending()
+      await this.deliver(await this.dependencies.repository.listPendingDeliveriesForEvent(eventKey))
     })
   }
 
@@ -184,7 +208,7 @@ export class NotificationService {
       this.dependencies.repository.findDueTaskConditions({
         // Reaches one escalation delay further back than the lookback window, so a
         // task whose DUE instant has aged out can still raise its OVERDUE event.
-        dueFrom: new Date(lookbackFrom.getTime() - TASK_OVERDUE_AFTER_MINUTES * MINUTE_MS),
+        dueFrom: new Date(lookbackFrom.getTime() - this.taskOverdueAfterMinutes() * MINUTE_MS),
         dueTo: now,
       }),
       this.dependencies.repository.findLeadNeedsActionConditions({
@@ -211,26 +235,55 @@ export class NotificationService {
     return { created, delivered: await this.deliverPending() }
   }
 
-  /**
-   * Best effort, exactly once. Only PENDING and unread notifications are sent, so
-   * a record the operator has already read never buzzes, and every attempt ends
-   * in a terminal delivery state — a failure is not retried, because the inbox
-   * already carries the information and hammering a broken push service would not
-   * add any.
-   *
-   * A send failure can never remove the record: `markDelivered` only ever writes
-   * the delivery column.
-   */
+  /** Sends everything currently unread and undelivered. See `deliver`. */
   async deliverPending(limit = DELIVERY_BATCH_SIZE): Promise<number> {
-    const pending = await this.dependencies.repository.listPendingDeliveries(limit)
-    if (pending.length === 0) return 0
+    return this.deliver(await this.dependencies.repository.listPendingDeliveries(limit))
+  }
+
+  /**
+   * Best effort, at most once per record — including under concurrency.
+   *
+   * Listing candidates and marking them delivered are two statements, so two
+   * overlapping passes would otherwise both read the same PENDING rows and both
+   * push, and the owner would get one lead announced twice. Each record is
+   * therefore CLAIMED first: a single conditional UPDATE off PENDING that exactly
+   * one pass can win, checked by the row count it reports. A pass that loses the
+   * claim skips that record entirely, because whoever won it is sending it.
+   *
+   * The claim writes FAILED rather than an in-flight state, which is what lets
+   * this work without a fourth enum value and, more importantly, without a reaper:
+   * if the process dies mid-send, the record is left saying the push did not
+   * arrive — which is exactly what is known at that point — instead of stranding a
+   * SENDING row that nothing will ever revisit. It is upgraded to SENT or SKIPPED
+   * the moment the attempt resolves.
+   *
+   * Only unread records are sent, so something the operator has already seen never
+   * buzzes. Nothing here can remove a record: the claim and the upgrade both write
+   * only the delivery column, so a failed push always leaves the notification
+   * readable in the centre (PRD 7.7).
+   */
+  private async deliver(candidates: DeliverableNotification[]): Promise<number> {
+    if (candidates.length === 0) return 0
 
     // One lookup per recipient per pass, not per notification: a dispatch run
     // routinely carries several records for the same person.
     const subscriptionsByUser = new Map<string, StoredPushSubscription[]>()
+    const passDeadline = this.now().getTime() + DELIVERY_PASS_BUDGET_MS
     let delivered = 0
 
-    for (const notification of pending) {
+    for (const notification of candidates) {
+      if (this.now().getTime() >= passDeadline) {
+        // Unclaimed records are still PENDING, so the next pass resumes from here
+        // rather than this one running past the schedule that started it.
+        console.warn(
+          `[notifications] delivery pass hit its ${DELIVERY_PASS_BUDGET_MS}ms budget; deferring the rest to the next run`,
+        )
+        break
+      }
+
+      // Nothing below runs unless this pass owns the record.
+      if (!(await this.dependencies.repository.claimForDelivery(notification.id))) continue
+
       if (!this.dependencies.delivery.configured) {
         await this.dependencies.repository.markDelivered(notification.id, 'SKIPPED')
         continue
@@ -290,8 +343,12 @@ export class NotificationService {
         )
       }
 
-      await this.dependencies.repository.markDelivered(notification.id, anySent ? 'SENT' : 'FAILED')
-      if (anySent) delivered += 1
+      // The claim already wrote FAILED, so this only ever upgrades the outcome; a
+      // genuine failure simply leaves the claim's value standing.
+      if (anySent) {
+        await this.dependencies.repository.markDelivered(notification.id, 'SENT')
+        delivered += 1
+      }
     }
 
     return delivered
@@ -321,14 +378,14 @@ export class NotificationService {
           kind: 'TASK_DUE' as const,
           title: 'Пора выполнить задачу',
           body: `«${task.title}» — ${task.clientName}`,
-          href: dealHref(task.dealId),
+          href: dealPath(task.dealId),
           eventKey: `task-due:${task.taskId}:${dueAt}`,
           dealId: task.dealId,
         })),
       )
     }
 
-    const overdueAt = new Date(task.dueAt.getTime() + TASK_OVERDUE_AFTER_MINUTES * MINUTE_MS)
+    const overdueAt = new Date(task.dueAt.getTime() + this.taskOverdueAfterMinutes() * MINUTE_MS)
     if (withinWindow(overdueAt, window)) {
       records.push(
         ...recipients.map((recipientUserId) => ({
@@ -336,7 +393,7 @@ export class NotificationService {
           kind: 'TASK_OVERDUE' as const,
           title: 'Просроченная задача',
           body: `«${task.title}» — ${task.clientName}`,
-          href: dealHref(task.dealId),
+          href: dealPath(task.dealId),
           eventKey: `task-overdue:${task.taskId}:${dueAt}`,
           dealId: task.dealId,
         })),
@@ -347,10 +404,20 @@ export class NotificationService {
   }
 
   /**
-   * The moment a new lead has spent its whole grace window without a next step
+   * The moment a lead has spent its whole grace window carrying NO task at all
    * (PRD 7.7). The key is anchored on creation plus that window — the instant the
    * condition began — so it is announced once and never again, however long the
-   * deal then stays without a task.
+   * deal then stays bare.
+   *
+   * "No task at all" is narrower than the list/board's `noNextStep`, deliberately.
+   * That flag means "no task in the FUTURE", which is also true of a deal whose
+   * task is merely overdue — correct for a filter offering «Без следующего шага»,
+   * but wrong here twice over: it would tell the owner «30 минут без задачи» about
+   * a deal that demonstrably has one, and it would fire alongside TASK_DUE for
+   * every inbound lead, since the auto-task comes due exactly when the grace window
+   * closes. Selecting on "no active task" instead makes the three conditions
+   * disjoint — the moment arrived, the moment passed, there is nothing scheduled —
+   * so an inbound lead raises one alert and the sentence is true when it does.
    */
   private leadRecords(
     lead: LeadNeedsActionCondition,
@@ -364,7 +431,7 @@ export class NotificationService {
       kind: 'LEAD_NEEDS_ACTION' as const,
       title: 'Заявка без следующего шага',
       body: `${lead.clientName} — ${NEXT_STEP_GRACE_MINUTES} минут без задачи`,
-      href: dealHref(lead.dealId),
+      href: dealPath(lead.dealId),
       eventKey: `lead-needs-action:${lead.dealId}:${graceElapsedAt.toISOString()}`,
       dealId: lead.dealId,
     }))
@@ -372,6 +439,10 @@ export class NotificationService {
 
   private now(): Date {
     return this.dependencies.clock.now()
+  }
+
+  private taskOverdueAfterMinutes(): number {
+    return this.dependencies.taskOverdueAfterMinutes ?? DEFAULT_TASK_OVERDUE_AFTER_MINUTES
   }
 }
 
@@ -395,11 +466,3 @@ function withinWindow(instant: Date, window: { now: Date; lookbackFrom: Date }):
   )
 }
 
-/**
- * Every notification points at the deal card. `notificationHrefSchema` requires a
- * same-origin absolute path, because the service worker of Task 8 hands this to
- * `clients.openWindow()`.
- */
-function dealHref(dealId: string): string {
-  return `/deals/${dealId}`
-}

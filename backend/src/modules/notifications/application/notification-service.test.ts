@@ -2,9 +2,9 @@ import { describe, expect, test } from 'bun:test'
 
 import type { TaskDeferrer } from '../../../background-tasks'
 import {
+  DEFAULT_TASK_OVERDUE_AFTER_MINUTES,
   DISPATCH_LOOKBACK_MINUTES,
   NotificationService,
-  TASK_OVERDUE_AFTER_MINUTES,
 } from './notification-service'
 import type {
   DeliverableNotification,
@@ -62,6 +62,18 @@ function createFakeRepository(
     return true
   }
 
+  const pendingDeliverables = (): DeliverableNotification[] =>
+    notifications
+      .filter((stored) => stored.deliveryState === 'PENDING' && stored.readAt === null)
+      .map((stored) => ({
+        id: stored.id,
+        recipientUserId: stored.recipientUserId,
+        kind: stored.kind,
+        title: stored.title,
+        body: stored.body,
+        href: stored.href,
+      }))
+
   const repository = {
     notifications,
     subscriptions,
@@ -82,17 +94,20 @@ function createFakeRepository(
       return options.leadsNeedingAction ?? []
     },
     async listPendingDeliveries(limit: number): Promise<DeliverableNotification[]> {
-      return notifications
-        .filter((stored) => stored.deliveryState === 'PENDING' && stored.readAt === null)
-        .slice(0, limit)
-        .map((stored) => ({
-          id: stored.id,
-          recipientUserId: stored.recipientUserId,
-          kind: stored.kind,
-          title: stored.title,
-          body: stored.body,
-          href: stored.href,
-        }))
+      return pendingDeliverables().slice(0, limit)
+    },
+    async listPendingDeliveriesForEvent(eventKey: string): Promise<DeliverableNotification[]> {
+      return pendingDeliverables().filter(
+        (deliverable) =>
+          notifications.find((stored) => stored.id === deliverable.id)?.eventKey === eventKey,
+      )
+    },
+    /** Mirrors the single conditional UPDATE: only one caller can win a record. */
+    async claimForDelivery(notificationId: string) {
+      const stored = notifications.find((candidate) => candidate.id === notificationId)
+      if (!stored || stored.deliveryState !== 'PENDING') return false
+      stored.deliveryState = 'FAILED'
+      return true
     },
     async markDelivered(notificationId: string, state: StoredNotification['deliveryState']) {
       const stored = notifications.find((candidate) => candidate.id === notificationId)
@@ -143,16 +158,19 @@ function createInlineDeferrer() {
 }
 
 function buildService(options: {
+  clock?: () => Date
   delivery: PushDelivery
   now: Date
   repository: NotificationRepository
+  taskOverdueAfterMinutes?: number
 }) {
   const { deferrer, settle } = createInlineDeferrer()
   const service = new NotificationService({
     backgroundTasks: deferrer,
-    clock: { now: () => options.now },
+    clock: { now: options.clock ?? (() => options.now) },
     delivery: options.delivery,
     repository: options.repository,
+    taskOverdueAfterMinutes: options.taskOverdueAfterMinutes,
   })
   return { service, settle }
 }
@@ -208,7 +226,7 @@ describe('NotificationService.dispatchDueEvents', () => {
 
   test('an unfinished task escalates to TASK_OVERDUE once, keyed on its due instant', async () => {
     const dueAt = new Date('2026-07-23T09:00:00.000Z')
-    const overdueAt = new Date(dueAt.getTime() + TASK_OVERDUE_AFTER_MINUTES * 60_000)
+    const overdueAt = new Date(dueAt.getTime() + DEFAULT_TASK_OVERDUE_AFTER_MINUTES * 60_000)
     const repository = createFakeRepository({ dueTasks: [{ ...taskDueNow, dueAt }] })
     const { service } = buildService({ delivery: createFakeDelivery().delivery, now, repository })
 
@@ -218,6 +236,33 @@ describe('NotificationService.dispatchDueEvents', () => {
     expect(overdueAt.getTime()).toBeLessThanOrEqual(now.getTime())
     expect(await repository.countByEventKey('task-overdue:task-1:2026-07-23T09:00:00.000Z')).toBe(1)
     expect(repository.notifications.filter((stored) => stored.kind === 'TASK_OVERDUE')).toHaveLength(1)
+  })
+
+  /**
+   * The escalation delay is an operator dial (NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES),
+   * so the same task must escalate or stay quiet purely on how it is configured.
+   */
+  test('honours the configured overdue delay rather than a fixed one', async () => {
+    const dueAt = new Date('2026-07-23T10:10:00.000Z') // 20 minutes before `now`
+    const kinds = async (taskOverdueAfterMinutes: number) => {
+      const repository = createFakeRepository({ dueTasks: [{ ...taskDueNow, dueAt }] })
+      const { service } = buildService({
+        delivery: createFakeDelivery().delivery,
+        now,
+        repository,
+        taskOverdueAfterMinutes,
+      })
+      await service.dispatchDueEvents(now)
+      return repository.notifications.map((stored) => stored.kind).sort()
+    }
+
+    // Default of 15 minutes: 20 minutes elapsed, so it has escalated.
+    expect(DEFAULT_TASK_OVERDUE_AFTER_MINUTES).toBe(15)
+    expect(await kinds(DEFAULT_TASK_OVERDUE_AFTER_MINUTES)).toEqual(['TASK_DUE', 'TASK_OVERDUE'])
+    // A patient operator: 45 minutes has not elapsed, so it has not.
+    expect(await kinds(45)).toEqual(['TASK_DUE'])
+    // An impatient one.
+    expect(await kinds(5)).toEqual(['TASK_DUE', 'TASK_OVERDUE'])
   })
 
   test('a task due right now has not escalated to overdue yet', async () => {
@@ -246,7 +291,7 @@ describe('NotificationService.dispatchDueEvents', () => {
     await service.dispatchDueEvents(now)
 
     expect(await repository.countByEventKey('lead-needs-action:deal-9:2026-07-23T10:20:00.000Z')).toBe(1)
-    expect(repository.notifications[0]!.href).toBe('/deals/deal-9')
+    expect(repository.notifications[0]!.href).toBe('/app/deals/deal-9')
   })
 
   test('conditions older than the lookback window stay silent', async () => {
@@ -352,6 +397,68 @@ describe('NotificationService push delivery', () => {
     ])
   })
 
+  /**
+   * Two passes racing over one record. Without the claim both would read it as
+   * PENDING and both would push, and the owner would get one event announced
+   * twice; with it, exactly one pass owns the record and the other skips it.
+   */
+  test('never pushes one record twice when two passes overlap', async () => {
+    const repository = withOneDueTask({
+      'owner-1': [subscriptionOf('sub-1', 'https://push.example/endpoint-1')],
+    })
+    const { delivery, attempts } = createFakeDelivery()
+    const { service } = buildService({ delivery, now, repository })
+    await service.dispatchDueEvents(now)
+    attempts.length = 0
+    // Put the record back in the state two concurrent passes would both observe.
+    repository.notifications[0]!.deliveryState = 'PENDING'
+
+    await Promise.all([service.deliverPending(), service.deliverPending()])
+
+    expect(attempts).toHaveLength(1)
+    expect(repository.notifications.map((stored) => stored.deliveryState)).toEqual(['SENT'])
+  })
+
+  /**
+   * Per-send timeouts bound one request, but a batch of slow-but-answering
+   * endpoints can still outlast the interval the job runs on — and a pass that
+   * outlives its own schedule is how overlap starts. Records left unclaimed stay
+   * PENDING for the next pass rather than being lost.
+   */
+  test('stops at its wall-clock budget and leaves the rest for the next pass', async () => {
+    const repository = createFakeRepository({
+      dueTasks: [
+        taskDueNow,
+        { ...taskDueNow, taskId: 'task-2' },
+        { ...taskDueNow, taskId: 'task-3' },
+      ],
+      subscriptions: { 'owner-1': [subscriptionOf('sub-1', 'https://push.example/endpoint-1')] },
+    })
+    // Each send costs a simulated two minutes, so the budget expires immediately.
+    let clock = now.getTime()
+    const delivery: PushDelivery = {
+      configured: true,
+      async send() {
+        clock += 2 * 60_000
+        return { status: 'sent' }
+      },
+    }
+    const { service } = buildService({
+      clock: () => new Date(clock),
+      delivery,
+      now,
+      repository,
+    })
+
+    const summary = await service.dispatchDueEvents(now)
+
+    expect(summary.created).toBe(3)
+    expect(summary.delivered).toBe(1)
+    expect(repository.notifications).toHaveLength(3)
+    // The two the budget cut short are untouched, so the next pass picks them up.
+    expect(repository.notifications.filter((s) => s.deliveryState === 'PENDING')).toHaveLength(2)
+  })
+
   test('a recipient with no subscription still gets a durable inbox record', async () => {
     const repository = withOneDueTask()
     const { delivery, attempts } = createFakeDelivery()
@@ -428,7 +535,7 @@ describe('NotificationService.newLeadRecorded', () => {
       'owner-2',
     ])
     expect(repository.notifications[0]!.kind).toBe('NEW_LEAD')
-    expect(repository.notifications[0]!.href).toBe('/deals/deal-1')
+    expect(repository.notifications[0]!.href).toBe('/app/deals/deal-1')
     expect(repository.notifications[0]!.dealId).toBe('deal-1')
   })
 

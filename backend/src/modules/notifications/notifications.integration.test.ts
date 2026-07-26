@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import { createHmac } from 'node:crypto'
 import {
   NEXT_STEP_GRACE_MINUTES,
+  dealPath,
   notificationListResponseSchema,
   notificationReadResponseSchema,
   pushSubscriptionResponseSchema,
@@ -218,7 +219,96 @@ maybeDescribe('notifications integration', () => {
         ).toISOString()}`,
       )
       expect(records[0]!.dealId).toBe(dealId)
-      expect(records[0]!.href).toBe(`/deals/${dealId}`)
+      expect(records[0]!.href).toBe(dealPath(dealId))
+    })
+
+    /**
+     * The owner asked for ONE alert when a new lead's auto-task comes due, not two.
+     *
+     * The cause was the condition, not the copy. Task 5 gives every inbound deal an
+     * auto-task due exactly one grace window after it arrives, and the lead
+     * condition used to select on the list/board's `noNextStep` — "no FUTURE task",
+     * which is also true the instant that auto-task comes due. So the deal raised
+     * TASK_DUE and, simultaneously, «30 минут без задачи» about a deal that plainly
+     * had a task. Selecting on "no ACTIVE task at all" makes the conditions
+     * disjoint, and this pins both halves: the inbound lead raises exactly one, and
+     * a genuinely bare deal still raises LEAD_NEEDS_ACTION.
+     */
+    test('an inbound lead at its auto-task due instant raises exactly one notification', async () => {
+      const { dealId } = await seedDealWithDueTask({
+        // The shape Task 5 produces: created a grace window ago, auto-task due now.
+        dueMinutesAgo: 0,
+        createdMinutesAgo: NEXT_STEP_GRACE_MINUTES,
+      })
+
+      await runCronTask('crm:notifications:dispatch', cronRuntime)
+
+      const mine = await prisma.notification.findMany({
+        where: { dealId, recipientUserId: ownerId },
+        select: { kind: true, body: true },
+      })
+      expect(mine).toHaveLength(1)
+      expect(mine[0]!.kind).toBe('TASK_DUE')
+      // The sentence that used to be false is simply not written.
+      expect(mine[0]!.body).not.toContain('без задачи')
+    })
+
+    test('a deal with no task at all past its grace window still raises LEAD_NEEDS_ACTION', async () => {
+      const dealId = await seedTasklessDeal({ createdMinutesAgo: NEXT_STEP_GRACE_MINUTES + 5 })
+
+      await runCronTask('crm:notifications:dispatch', cronRuntime)
+
+      const mine = await prisma.notification.findMany({
+        where: { dealId, recipientUserId: ownerId },
+        select: { kind: true, body: true },
+      })
+      expect(mine).toHaveLength(1)
+      expect(mine[0]!.kind).toBe('LEAD_NEEDS_ACTION')
+      expect(mine[0]!.body).toContain('без задачи')
+    })
+
+    /**
+     * A deal whose only task is already OVERDUE has `noNextStep` true but is not
+     * "without a task" — it is the TASK_OVERDUE case. It must not also be told it
+     * has nothing scheduled.
+     */
+    test('a deal whose task is merely overdue is never called task-less', async () => {
+      const { dealId } = await seedDealWithDueTask({
+        dueMinutesAgo: 120,
+        createdMinutesAgo: 180,
+      })
+
+      await runCronTask('crm:notifications:dispatch', cronRuntime)
+
+      const kinds = (
+        await prisma.notification.findMany({
+          where: { dealId, recipientUserId: ownerId },
+          select: { kind: true },
+        })
+      ).map((row) => row.kind)
+      expect(kinds).not.toContain('LEAD_NEEDS_ACTION')
+      expect(kinds.sort()).toEqual(['TASK_DUE', 'TASK_OVERDUE'])
+    })
+
+    /**
+     * `markDelivered` is an `updateMany`, so a record that cascades away
+     * mid-pass is a no-op rather than a P2025 that would abort the pass over every
+     * unrelated record behind it. A revert to `update` fails here.
+     */
+    test('completes the pass when a notification vanishes mid-run', async () => {
+      const { dealId } = await seedDealWithDueTask({ dueMinutesAgo: 5 })
+      const survivor = await seedTasklessDeal({ createdMinutesAgo: NEXT_STEP_GRACE_MINUTES + 5 })
+      const repository = createPrismaNotificationRepository(prisma)
+      await runCronTask('crm:notifications:dispatch', cronRuntime)
+
+      // The deal cascade-deletes its notifications, exactly as a mid-pass delete would.
+      await prisma.notification.deleteMany({ where: { dealId } })
+      await expect(repository.markDelivered('01912d4e-9999-7000-8000-000000000099', 'SENT'))
+        .resolves.toBeUndefined()
+
+      // The unrelated records are untouched and the pass still completes.
+      await expect(runCronTask('crm:notifications:dispatch', cronRuntime)).resolves.toBeUndefined()
+      expect(await prisma.notification.count({ where: { dealId: survivor } })).toBe(2)
     })
 
     test('leaves a deal that still has a future task alone', async () => {
@@ -278,7 +368,7 @@ maybeDescribe('notifications integration', () => {
         new Set([`new-lead:${dealId}`]),
       )
       expect(records[0]!.dealId).toBe(dealId)
-      expect(records[0]!.href).toBe(`/deals/${dealId}`)
+      expect(records[0]!.href).toBe(dealPath(dealId))
       expect(records[0]!.body).toBe('Олександр · teraso.com.ua')
     })
 

@@ -33,6 +33,7 @@ import {
   notificationSchema,
   pushSubscriptionCreateSchema,
 } from './notifications'
+import { APP_PATH_PREFIX, dealPath } from './app-paths'
 import { dealStageSchema, lossReasonSchema, notificationKindSchema } from './index'
 
 const inboundLead = {
@@ -607,6 +608,33 @@ describe('notification contracts', () => {
     ).toThrow()
   })
 
+  /**
+   * The stored endpoint is a URL the SERVER dereferences on an unattended
+   * schedule, so the scheme is a security boundary rather than a formatting
+   * preference: any authenticated user could otherwise park an internal address
+   * here and read reachability back out of `deliveryState`.
+   */
+  test('accepts only https push endpoints', () => {
+    const subscription = { keys: { p256dh: 'BPk1', auth: 'tBHI' } }
+
+    expect(
+      pushSubscriptionCreateSchema.parse({
+        ...subscription,
+        endpoint: 'https://fcm.googleapis.com/fcm/send/abc',
+      }).endpoint,
+    ).toBe('https://fcm.googleapis.com/fcm/send/abc')
+
+    for (const endpoint of [
+      'http://fcm.googleapis.com/fcm/send/abc',
+      'http://169.254.169.254/latest/meta-data/',
+      'http://localhost:5432/',
+      'ftp://internal.example/queue',
+      'file:///etc/passwd',
+    ]) {
+      expect(() => pushSubscriptionCreateSchema.parse({ ...subscription, endpoint })).toThrow()
+    }
+  })
+
   test('keeps the browser expirationTime field the PushManager actually sends', () => {
     expect(
       pushSubscriptionCreateSchema.parse({
@@ -649,5 +677,43 @@ describe('notification contracts', () => {
     expect(() =>
       notificationSchema.parse({ ...notification, eventKey: 'task-due:task-1' }),
     ).toThrow()
+  })
+
+  /**
+   * `href` is denormalized into every stored row and handed straight to
+   * `clients.openWindow()`, so a producer spelling its own path would commit a
+   * dead link that only surfaces when somebody clicks a push — repairable then
+   * only by a data migration. The prefix is therefore pinned at the boundary,
+   * and every producer builds the path from `dealPath`.
+   */
+  test('pins a notification link to the authenticated app prefix', () => {
+    const notification = {
+      id: uuid('1'),
+      kind: 'NEW_LEAD',
+      title: 'Новая заявка',
+      body: 'Олександр',
+      href: dealPath(uuid('2')),
+      dealId: uuid('2'),
+      deliveryState: 'PENDING',
+      readAt: null,
+      createdAt: '2026-07-23T09:00:00.000Z',
+    } as const
+
+    expect(dealPath(uuid('2'))).toBe(`${APP_PATH_PREFIX}/deals/${uuid('2')}`)
+    expect(notificationSchema.parse(notification).href).toBe(`/app/deals/${uuid('2')}`)
+
+    for (const href of [
+      // The unauthenticated marketing surface, and the exact shape a producer
+      // that spelled the path itself would emit.
+      `/deals/${uuid('2')}`,
+      '/login',
+      // A bare prefix is not a destination.
+      APP_PATH_PREFIX,
+      `${APP_PATH_PREFIX}/`,
+      // Prefix as a substring rather than a path segment.
+      '/application/deals',
+    ]) {
+      expect(() => notificationSchema.parse({ ...notification, href })).toThrow()
+    }
   })
 })

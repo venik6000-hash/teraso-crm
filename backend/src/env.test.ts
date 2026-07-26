@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { loadEnv } from './env'
+import { loadEnv, vapidConfigFrom } from './env'
 
 describe('loadEnv', () => {
   test('parses defaults and comma-separated origins', () => {
@@ -328,5 +328,61 @@ describe('loadEnv', () => {
       .toThrow('VAPID_SUBJECT')
     expect(() => loadEnv({ ...baseEnv, ...vapid, VAPID_SUBJECT: 'https://teraso.com.ua' }))
       .not.toThrow()
+  })
+
+  /**
+   * The overdue-escalation delay is an operator dial the owner tunes as he uses
+   * the CRM. It is left OPTIONAL rather than `.default()`ed, exactly like the two
+   * webhook limits, because a default would make the field required on the
+   * inferred AppEnv and force every hand-built test literal to restate it; the
+   * fallback lives where it is consumed.
+   */
+  test('treats the overdue notification delay as an optional operator dial', () => {
+    const baseEnv = {
+      DATABASE_URL: 'postgresql://superuser:superpassword@localhost:54329/teraso_crm',
+      JWT_SECRET: '12345678901234567890123456789012',
+    }
+
+    expect(loadEnv(baseEnv).NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES).toBeUndefined()
+    expect(
+      loadEnv({ ...baseEnv, NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES: '45' })
+        .NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES,
+    ).toBe(45)
+
+    for (const invalid of ['0', '-5', '2.5', 'soon', '1441']) {
+      expect(() =>
+        loadEnv({ ...baseEnv, NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES: invalid }),
+      ).toThrow()
+    }
+  })
+
+  /**
+   * The composition roots read the VAPID group through this helper so the
+   * all-or-nothing invariant is asserted in exactly one place — the validator —
+   * rather than restated as non-null assertions in app.ts and cron.ts.
+   */
+  test('assembles the VAPID group only when it is completely configured', () => {
+    const baseEnv = {
+      DATABASE_URL: 'postgresql://superuser:superpassword@localhost:54329/teraso_crm',
+      JWT_SECRET: '12345678901234567890123456789012',
+    }
+
+    expect(vapidConfigFrom(loadEnv(baseEnv))).toBeUndefined()
+    expect(
+      vapidConfigFrom(
+        loadEnv({
+          ...baseEnv,
+          VAPID_SUBJECT: 'mailto:crm@teraso.com.ua',
+          VAPID_PUBLIC_KEY:
+            'BOl_yWecy7dd7cqwIR8tarfNq2VkxRE02mfa-NEaqCLA81r8GivBYWAZpmG_zKM6rJFc7vMpSHM9JGIjWEI11GA',
+          VAPID_PRIVATE_KEY: 'BUCJiIHPD65Vc69ARTp7LVfMFgnheEm-JEGN5n46Vxw',
+        }),
+      ),
+    ).toEqual({
+      subject: 'mailto:crm@teraso.com.ua',
+      publicKey:
+        'BOl_yWecy7dd7cqwIR8tarfNq2VkxRE02mfa-NEaqCLA81r8GivBYWAZpmG_zKM6rJFc7vMpSHM9JGIjWEI11GA',
+      privateKey: 'BUCJiIHPD65Vc69ARTp7LVfMFgnheEm-JEGN5n46Vxw',
+    })
   })
 })

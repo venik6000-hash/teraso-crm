@@ -32,13 +32,20 @@ function pushError(statusCode: number) {
 
 describe('createWebPushDelivery', () => {
   test('reports a successful send and hands the payload to the provider as JSON', async () => {
-    const calls: Array<{ endpoint: string; payload: string; subject: string; privateKey: string }> = []
+    const calls: Array<{
+      endpoint: string
+      payload: string
+      subject: string
+      privateKey: string
+      timeout: number
+    }> = []
     const delivery = createWebPushDelivery(vapid, async (target, body, options) => {
       calls.push({
         endpoint: target.endpoint,
         payload: String(body),
         subject: options.vapidDetails.subject,
         privateKey: options.vapidDetails.privateKey,
+        timeout: options.timeout,
       })
       return undefined
     })
@@ -50,6 +57,39 @@ describe('createWebPushDelivery', () => {
     expect(JSON.parse(calls[0]!.payload)).toEqual(payload)
     expect(calls[0]!.subject).toBe(vapid.subject)
     expect(calls[0]!.privateKey).toBe(vapid.privateKey)
+  })
+
+  /**
+   * Node's `https.request` has no default timeout, so a push service that accepts
+   * the connection and never answers would hold the request open forever — and the
+   * dispatcher sends serially, on an unattended schedule, so that is not one lost
+   * notification but a pass that never ends. A missing timeout is invisible in
+   * every other test here, which is why it is asserted on its own.
+   */
+  test('bounds every send with a socket timeout', async () => {
+    const timeouts: Array<number | undefined> = []
+    const delivery = createWebPushDelivery(vapid, async (_target, _body, options) => {
+      timeouts.push(options.timeout)
+      return undefined
+    })
+
+    await delivery.send(subscription, payload)
+
+    expect(timeouts).toHaveLength(1)
+    expect(typeof timeouts[0]).toBe('number')
+    expect(timeouts[0]).toBeGreaterThan(0)
+    expect(timeouts[0]).toBeLessThanOrEqual(30_000)
+  })
+
+  test('keeps the subscription when a send times out', async () => {
+    const delivery = createWebPushDelivery(vapid, async () => {
+      throw new Error('socket hang up')
+    })
+
+    expect(await delivery.send(subscription, payload)).toEqual({
+      status: 'failed',
+      reason: 'socket hang up',
+    })
   })
 
   test('treats 404 and 410 as terminal so only those retire an endpoint', async () => {

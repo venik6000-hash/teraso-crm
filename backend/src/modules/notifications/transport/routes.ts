@@ -63,6 +63,24 @@ const subscribeRoute = createRoute({
   },
 })
 
+/**
+ * Keyed on the subscription id, with no `GET /subscriptions` beside it, and both
+ * halves of that are deliberate.
+ *
+ * The browser never has to remember the id. The server may retire an endpoint on
+ * its own (a 404/410 from the push service) without the browser hearing about it,
+ * so Task 8 has to re-POST whatever `pushManager.getSubscription()` returns on
+ * every boot regardless — and because that POST is an upsert, it hands back the
+ * stable row id every time. There is therefore no moment where the client holds a
+ * subscription but not its id, which is the only thing a listing endpoint would
+ * have provided.
+ *
+ * Keying on the endpoint instead — the client's natural handle — would mean a push
+ * endpoint travelling in a request line. That endpoint is a capability URL:
+ * anyone holding it can send that browser notifications, and request lines end up
+ * in access logs and proxy traces. Keeping it in a POST body is the reason the id
+ * is worth the indirection.
+ */
 const unsubscribeRoute = createRoute({
   method: 'delete',
   path: '/subscriptions/{subscriptionId}',

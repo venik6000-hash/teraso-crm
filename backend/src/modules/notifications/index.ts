@@ -14,6 +14,8 @@ type CreateNotificationsModuleOptions = {
   clock?: Clock
   db: DbClient
   requireAuth: MiddlewareHandler<AuthHttpEnv>
+  /** Operator dial; see NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES in env.ts. */
+  taskOverdueAfterMinutes?: number
   /**
    * Absent means browser push is not configured. The module still records every
    * notification and serves the inbox; the sends are simply marked SKIPPED, which
@@ -38,9 +40,16 @@ export function createNotificationsModule({
   clock = systemClock,
   db,
   requireAuth,
+  taskOverdueAfterMinutes,
   vapid,
 }: CreateNotificationsModuleOptions) {
-  const service = createNotificationService({ backgroundTasks, clock, db, vapid })
+  const service = createNotificationService({
+    backgroundTasks,
+    clock,
+    db,
+    taskOverdueAfterMinutes,
+    vapid,
+  })
 
   return {
     service,
@@ -57,11 +66,13 @@ export function createNotificationService({
   backgroundTasks,
   clock = systemClock,
   db,
+  taskOverdueAfterMinutes,
   vapid,
 }: {
   backgroundTasks: TaskDeferrer
   clock?: Clock
   db: DbClient
+  taskOverdueAfterMinutes?: number
   vapid?: VapidConfig
 }) {
   return new NotificationService({
@@ -69,6 +80,7 @@ export function createNotificationService({
     clock,
     delivery: createWebPushDelivery(vapid),
     repository: createPrismaNotificationRepository(db),
+    taskOverdueAfterMinutes,
   })
 }
 

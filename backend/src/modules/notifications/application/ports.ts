@@ -136,6 +136,16 @@ export type NotificationRepository = NotificationWriter & {
 
   listPendingDeliveries(limit: number): Promise<DeliverableNotification[]>
 
+  /** The unsent records for one event key, so a trigger can push just its own. */
+  listPendingDeliveriesForEvent(eventKey: string): Promise<DeliverableNotification[]>
+
+  /**
+   * Atomically takes one record off PENDING for sending. False means another pass
+   * already owns it and this one must not send it too. See the implementation for
+   * why the claim is written as a terminal state rather than an in-flight one.
+   */
+  claimForDelivery(notificationId: string): Promise<boolean>
+
   markDelivered(notificationId: string, state: NotificationDeliveryState): Promise<void>
 
   /**

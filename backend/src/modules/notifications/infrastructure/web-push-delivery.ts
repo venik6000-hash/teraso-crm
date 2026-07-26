@@ -21,7 +21,7 @@ export type VapidConfig = {
 export type WebPushSender = (
   subscription: { endpoint: string; keys: { p256dh: string; auth: string } },
   payload: string,
-  options: { vapidDetails: VapidConfig; TTL: number },
+  options: { vapidDetails: VapidConfig; TTL: number; timeout: number },
 ) => Promise<unknown>
 
 /**
@@ -31,6 +31,18 @@ export type WebPushSender = (
  * device for it would be noise.
  */
 const PUSH_TTL_SECONDS = 24 * 60 * 60
+
+/**
+ * Socket timeout for one send.
+ *
+ * Node's `https.request` has no default timeout, so without this a push service
+ * that accepts the connection and then never answers holds the request open
+ * forever. The dispatcher sends serially, so that is not one lost notification —
+ * it is a delivery pass that never ends, on the least-supervised path in the
+ * system, where nothing is watching to notice. Ten seconds is far beyond any
+ * healthy push service and far below the pass budget above it.
+ */
+const PUSH_TIMEOUT_MS = 10_000
 
 /**
  * The two status codes that mean the endpoint itself is gone for good — the user
@@ -73,7 +85,7 @@ export function createWebPushDelivery(
             keys: { p256dh: subscription.p256dh, auth: subscription.auth },
           },
           JSON.stringify(payload),
-          { vapidDetails: config, TTL: PUSH_TTL_SECONDS },
+          { vapidDetails: config, TTL: PUSH_TTL_SECONDS, timeout: PUSH_TIMEOUT_MS },
         )
         return { status: 'sent' }
       } catch (error) {

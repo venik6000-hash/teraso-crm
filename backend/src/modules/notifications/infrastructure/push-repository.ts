@@ -5,9 +5,9 @@ import {
   type PushSubscriptionDto,
 } from '@teraso-crm/contracts'
 
-import type { DbClient } from '../../../db'
+import { isUniqueViolationOn, type DbClient } from '../../../db'
 import { Prisma } from '../../../generated/prisma/client'
-import { evaluateDealCriticality, nextStepGraceCutoff } from '../../crm'
+import { nextStepGraceCutoff } from '../../crm'
 import type {
   DueTaskCondition,
   LeadNeedsActionCondition,
@@ -20,8 +20,12 @@ import type {
 /**
  * How many conditions one dispatch pass will look at. The job runs on a short
  * cadence, so an unbounded scan of a CRM that has been running for years is
- * needless work every minute; the oldest conditions are taken first, and anything
- * beyond this is out of the lookback window in practice.
+ * needless work every minute.
+ *
+ * Both scans take the NEWEST qualifying rows and log when the cap binds. Neither
+ * property is decoration: oldest-first would spend the budget on conditions
+ * already announced and quietly starve the fresh ones forever, and a cap that
+ * binds without a trace is unattended code doing less than it claims.
  */
 const CONDITION_SCAN_LIMIT = 500
 
@@ -43,6 +47,27 @@ const subscriptionSelect = {
   userAgent: true,
   createdAt: true,
 } satisfies Prisma.PushSubscriptionSelect
+
+const deliverableSelect = {
+  id: true,
+  recipientUserId: true,
+  kind: true,
+  title: true,
+  body: true,
+  href: true,
+} satisfies Prisma.NotificationSelect
+
+/**
+ * A condition scan that came back exactly full was probably truncated, and the
+ * conditions it dropped are announced by nobody. Unattended code that silently
+ * does less than it was asked is the failure mode worth a line in the log.
+ */
+function warnIfScanCapped(rowCount: number, scan: string) {
+  if (rowCount < CONDITION_SCAN_LIMIT) return
+  console.warn(
+    `[notifications] ${scan} returned the full ${CONDITION_SCAN_LIMIT}-row scan cap; older conditions in this window were not considered`,
+  )
+}
 
 /**
  * Notification persistence.
@@ -139,15 +164,39 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
         where: { deliveryState: 'PENDING', readAt: null },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         take: limit,
-        select: {
-          id: true,
-          recipientUserId: true,
-          kind: true,
-          title: true,
-          body: true,
-          href: true,
-        },
+        select: deliverableSelect,
       })
+    },
+
+    listPendingDeliveriesForEvent(eventKey) {
+      return db.notification.findMany({
+        where: { deliveryState: 'PENDING', readAt: null, eventKey },
+        orderBy: [{ id: 'asc' }],
+        select: deliverableSelect,
+      })
+    },
+
+    /**
+     * Takes exclusive ownership of one record for sending, or reports that
+     * somebody else already has it.
+     *
+     * This is a single conditional UPDATE, so PostgreSQL settles the race on the
+     * row itself: of two overlapping passes reading the same PENDING record,
+     * exactly one sees `count === 1` and the other sees 0 and moves on. Doing this
+     * as read-then-write in the application would reopen the very window it exists
+     * to close.
+     *
+     * It claims by writing FAILED — the honest reading of "we tried and cannot say
+     * it arrived" — so a process that dies mid-send leaves a record that is merely
+     * pessimistic rather than one stuck in an in-flight state that no reaper
+     * exists to release. The caller upgrades it on success.
+     */
+    async claimForDelivery(notificationId) {
+      const claimed = await db.notification.updateMany({
+        where: { id: notificationId, deliveryState: 'PENDING' },
+        data: { deliveryState: 'FAILED' },
+      })
+      return claimed.count === 1
     },
 
     async markDelivered(notificationId, state) {
@@ -168,6 +217,14 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
       return users.map((user) => user.id)
     },
 
+    /**
+     * Newest first, which matters only when the cap binds — and then decisively.
+     * Oldest-first would hand the whole budget to the conditions announced longest
+     * ago, which produce no new records, so the system would settle into writing
+     * nothing while reporting success and the freshest alerts would never be sent.
+     * Taking the newest means anything crowded out is older, already announced, or
+     * about to leave the lookback window anyway.
+     */
     async findDueTaskConditions({ dueFrom, dueTo }) {
       const tasks = await db.dealTask.findMany({
         where: {
@@ -175,7 +232,7 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
           dueAt: { gte: dueFrom, lte: dueTo },
           deal: { stage: { in: [...OPEN_DEAL_STAGES] } },
         },
-        orderBy: [{ dueAt: 'asc' }, { id: 'asc' }],
+        orderBy: [{ dueAt: 'desc' }, { id: 'desc' }],
         take: CONDITION_SCAN_LIMIT,
         select: {
           id: true,
@@ -186,6 +243,8 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
           deal: { select: { client: { select: { name: true } } } },
         },
       })
+
+      warnIfScanCapped(tasks.length, 'findDueTaskConditions')
 
       return tasks.map(
         (task): DueTaskCondition => ({
@@ -200,56 +259,57 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
     },
 
     /**
-     * The «no next step past its grace window» condition of PRD 7.4/7.7.
+     * The «grace window closed with nothing scheduled» condition of PRD 7.7.
      *
-     * The SQL narrows to open deals whose grace window has already closed — using
-     * the CRM's own `nextStepGraceCutoff`, so the window is read from one place —
-     * and the decision itself is then made by `evaluateDealCriticality`, the same
-     * domain function the deal list and board serve their flags from. Neither the
-     * cutoff nor the rule is restated here; a third copy is exactly what would
-     * drift away from the other two.
+     * The whole predicate is in SQL — open stage, grace window closed, and no
+     * ACTIVE task whatsoever — so the scan limit selects rows that actually
+     * qualify. Filtering in memory after `take` would spend the budget on healthy
+     * deals and silently drop the one that needs attention, which is the opposite
+     * of what a cap is for.
+     *
+     * `nextStepGraceCutoff` is the CRM's own, so the window is read from one place.
+     * The task predicate deliberately does NOT reuse `evaluateDealCriticality`:
+     * its `noNextStep` means "no FUTURE task" and so is also true of a deal whose
+     * task is merely overdue — right for the list filter, wrong for an alert that
+     * says «без задачи». See `leadRecords` for why the three conditions have to
+     * stay disjoint.
+     *
+     * NOTE for the next consumer: this is the second place that queries CRM tables
+     * from outside the CRM module, and `architecture:check` cannot see that
+     * coupling — it only sees the shared rule imported through the public index. A
+     * third consumer should stop here and give the CRM module a read port
+     * (`findDealsWithoutNextStep(window)`) exposed from its index, mirroring the
+     * `LeadNotifier` port that runs the other way, rather than adding a third
+     * hand-written query over somebody else's schema.
      */
     async findLeadNeedsActionConditions({ createdFrom, now }) {
       const deals = await db.deal.findMany({
         where: {
           stage: { in: [...OPEN_DEAL_STAGES] },
           createdAt: { gte: createdFrom, lte: nextStepGraceCutoff(now) },
+          tasks: { none: { status: 'ACTIVE' } },
         },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        // Newest first, like the task scan and for the same reason.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: CONDITION_SCAN_LIMIT,
         select: {
           id: true,
-          stage: true,
           createdAt: true,
           responsibleUserId: true,
           client: { select: { name: true } },
-          tasks: {
-            where: { status: 'ACTIVE' },
-            orderBy: [{ dueAt: 'asc' }, { id: 'asc' }],
-            take: 1,
-            select: { dueAt: true },
-          },
         },
       })
 
-      return deals
-        .filter(
-          (deal) =>
-            evaluateDealCriticality({
-              stage: deal.stage,
-              now,
-              createdAt: deal.createdAt,
-              activeDueAt: deal.tasks[0]?.dueAt ?? null,
-            }).noNextStep,
-        )
-        .map(
-          (deal): LeadNeedsActionCondition => ({
-            dealId: deal.id,
-            createdAt: deal.createdAt,
-            responsibleUserId: deal.responsibleUserId,
-            clientName: deal.client.name,
-          }),
-        )
+      warnIfScanCapped(deals.length, 'findLeadNeedsActionConditions')
+
+      return deals.map(
+        (deal): LeadNeedsActionCondition => ({
+          dealId: deal.id,
+          createdAt: deal.createdAt,
+          responsibleUserId: deal.responsibleUserId,
+          clientName: deal.client.name,
+        }),
+      )
     },
 
     /**
@@ -260,10 +320,12 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
      * moves the endpoint to the current owner instead of failing, and never leaves
      * two rows pushing to one device.
      *
-     * A P2002 here needs no column check — `push_subscriptions` has exactly one
-     * unique constraint besides its primary key — and means two subscribe calls
-     * for one endpoint raced between the upsert's read and its write. Retrying
-     * once lands on the update branch against the committed row.
+     * The retried P2002 is scoped to the `endpoint` column through the shared
+     * detector rather than matched on the code alone. `push_subscriptions` happens
+     * to have one unique constraint today, but a migration adding another would
+     * turn an unrelated conflict into a silent retry of a write that can never
+     * succeed — and a comment asserting "only one constraint" is not something a
+     * future migration has any reason to read.
      */
     async createSubscription(command: PushSubscriptionCreateCommand) {
       for (let attempt = 0; ; attempt += 1) {
@@ -287,7 +349,7 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
           })
           return toSubscriptionDto(subscription)
         } catch (error) {
-          if (attempt === 0 && isUniqueViolation(error)) continue
+          if (attempt === 0 && isUniqueViolationOn(error, 'endpoint')) continue
           throw error
         }
       }
@@ -316,10 +378,6 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
       })
     },
   }
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
 }
 
 function toNotificationDto(row: {
