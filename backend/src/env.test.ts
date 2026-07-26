@@ -153,7 +153,9 @@ describe('loadEnv', () => {
       }),
     ).toThrow('TERASO_WEBHOOK_SECRET')
 
-    // The documented placeholder must never reach production.
+    // A placeholder-shaped value: long enough to clear the floor, but not hex, so
+    // the generated-secret check refuses it. (.env.example ships this variable
+    // empty rather than with a placeholder, so there is no literal to enumerate.)
     expect(() =>
       loadEnv({
         ...productionBase,

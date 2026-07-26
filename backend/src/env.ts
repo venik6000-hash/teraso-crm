@@ -6,14 +6,17 @@ const booleanStringSchema = z
   .transform((value) => value === 'true')
 
 /**
- * Placeholders that must never survive into a production runtime. They are shared
- * by every secret this file validates, so a value documented in .env.example cannot
- * be promoted by accident.
+ * Placeholder values that actually ship in .env.example, so none of them can be
+ * promoted to production by accident. Shared by every secret this file validates.
+ *
+ * Only JWT_SECRET needs an entry: it is required, so .env.example must carry some
+ * value for the app to boot at all. TERASO_WEBHOOK_SECRET is optional and ships
+ * empty — the endpoint then fails closed — so it has no placeholder to guard, and a
+ * speculative entry here would be a guard with no target. A weak webhook secret is
+ * still refused: the length floor rejects short values everywhere, and
+ * isGeneratedSecret rejects anything non-hex or low-entropy in production.
  */
-const knownWeakSecrets = new Set([
-  'replace-with-at-least-32-random-characters',
-  'replace-with-a-long-random-webhook-secret',
-])
+const knownWeakSecrets = new Set(['replace-with-at-least-32-random-characters'])
 
 /**
  * Length floor for the site webhook secret, in every environment. It guards the
