@@ -4,9 +4,9 @@ The goal of this template's tests is to show future agents where behavior should
 
 ## Pyramid
 
-- Contracts/unit: shared Zod schema matrices, env parsing, JWTs, password hashing, client API refresh/retry behavior, and token cleanup.
-- Backend integration: refresh-token rotation and replay detection, one-time password reset and session revocation, auth/role guards, profile updates, serialized administrator role changes, duplicate registration, concurrency, and stable error shapes through real routes and PostgreSQL.
-- Webapp Playwright: valuable browser flows through a real backend and Vite UI.
+- Contracts/unit: shared Zod schema matrices, env parsing, JWTs, password hashing, CRM domain rules (phone normalization, funnel/payment policy, Kyiv time), client API refresh/retry behavior, and token cleanup.
+- Backend integration: refresh-token rotation and replay detection, one-time password reset and session revocation, auth/role guards, profile updates, serialized administrator role changes, duplicate registration, concurrency, and stable error shapes through real routes and PostgreSQL; plus the CRM surface — funnel and payment enforcement, task criticality, signed webhook ingestion and its idempotency, and notification dispatch and push delivery states.
+- Webapp Playwright: valuable browser flows through a real backend and Vite UI, including the CRM journey below.
 - Mobile Maestro: lives on the `mobile` branch with the runnable Expo app.
 
 Client E2E should cover valuable user journeys, including non-happy-path states that protect real product behavior, when they can stay stable. Important edge cases must be covered at some automated level; choosing integration, contract, or unit coverage instead of E2E is not permission to skip them. Negative validation matrices, combinatorial edge cases, concurrency, and pure rules belong in unit/integration tests.
@@ -41,11 +41,13 @@ bun run smoke:backend:docker
 
 Contract tests live in `packages/contracts/src/*.test.ts` and protect shared request/response/error schemas used by backend and webapp. Webapp unit tests live in `webapp/tests` and cover API refresh/retry behavior that would be too expensive and brittle to fully exercise in E2E. The `mobile` branch extends this same contract/testing model for Expo.
 
-Backend tests live next to their owning product modules. Integration tests exercise auth and users/admin RBAC through application/transport boundaries and real PostgreSQL persistence. The integration runner starts `postgres_test`, applies migrations, and covers session rotation, role guards, profile validation, last-admin/concurrent-demotion safety, role-change session revocation, seed idempotence, and stable error shapes. By default, the test database port is derived from the absolute repository path so parallel checkouts do not collide, and `TEST_DATABASE_URL` is derived from that port. Set `POSTGRES_TEST_PORT` and `TEST_DATABASE_URL` only when a fixed test database is required. Local database startup, credentials, and reset behavior are documented in [LOCAL_DATABASE.md](LOCAL_DATABASE.md).
+Backend tests live next to their owning product modules. Integration tests exercise auth, users/admin RBAC, and the CRM through application/transport boundaries and real PostgreSQL persistence. The integration runner starts `postgres_test`, applies migrations, and covers session rotation, role guards, profile validation, last-admin/concurrent-demotion safety, role-change session revocation, seed idempotence, stable error shapes, CRM funnel/payment enforcement, signed webhook ingestion and idempotency, and notification dispatch. By default, the test database port is derived from the absolute repository path so parallel checkouts do not collide, and `TEST_DATABASE_URL` is derived from that port. Set `POSTGRES_TEST_PORT` and `TEST_DATABASE_URL` only when a fixed test database is required. Local database startup, credentials, and reset behavior are documented in [LOCAL_DATABASE.md](LOCAL_DATABASE.md).
 
 The integration and Docker smoke runners refuse database names that do not end with `_test` unless an override is set intentionally. This protects `teraso_crm` development data from test writes.
 
 The Docker smoke test builds the backend image, starts it against `postgres_test`, waits for `/health/ready`, and removes only the smoke container it created.
+
+`prisma:validate` only checks that `schema.prisma` is syntactically valid; nothing in the suites compares the schema to a real database, so a schema change without a matching migration passes every gate. The read-only drift check and how to read its exit codes are in [OPERATIONS.md](OPERATIONS.md).
 
 `.github/workflows/ci.yml` runs typecheck, deployment/script tests, contract tests, webapp client tests, backend tests, and the webapp Playwright smoke flow on pushes to `main` and `master` plus pull requests.
 
@@ -77,7 +79,53 @@ The webapp E2E flow:
 - stops its `postgres_test` compose project and removes the test volume after the run unless `E2E_KEEP_DOCKER=1` is set;
 - runs the user path: validation -> register -> `/app` sidebar -> refresh -> profile persistence -> logout/login safe return;
 - runs the administrator path: seeded login -> `/admin` sidebar -> cross-role redirects -> search/promotion -> target session revocation -> admin login;
-- restores one logical browser session concurrently in two tabs, propagates confirmed logout and bootstrap-error recovery, and converges both tabs on the winning session after competing account changes.
+- restores one logical browser session concurrently in two tabs, propagates confirmed logout and bootstrap-error recovery, and converges both tabs on the winning session after competing account changes;
+- runs the CRM journey described below.
+
+### The CRM journey
+
+`webapp/e2e/specs/crm.spec.ts` (`quiz lead reaches success`) is the product's
+end-to-end proof and the primary signal for CRM work. It drives the real
+HMAC-signed site webhook rather than seeding a row, because idempotency and the
+auto-created follow-up task are properties of that endpoint:
+
+signed `POST /api/crm/inbound/quiz` -> lead visible and critical in `/app/deals`
+-> deal card shows the quiz answers -> timeline note -> lead class -> scheduled
+next-step task -> funnel moves, including a `PREPAYMENT` move refused without an
+amount and date -> full payment closes the deal as won -> the dashboard reports
+the full payment as revenue -> replaying the same `externalId` still leaves
+exactly one deal.
+
+`receivedAt` is backdated well past the next-step window while the signature
+timestamp stays fresh, so the deal is already critical when the browser opens it
+and the test never waits on a clock.
+
+Run it alone with:
+
+```bash
+bun run e2e:webapp -- --grep "quiz lead reaches success"
+```
+
+### Test backend configuration
+
+Playwright starts the backend with two settings that differ from production
+(`webapp/playwright.config.ts`):
+
+- `TERASO_WEBHOOK_SECRET` is set to a fixed, obviously-test value from
+  `webapp/e2e/env.ts`. Without a secret the inbound endpoint correctly fails
+  closed and rejects every delivery with `401`, so the CRM journey could not run
+  at all. The stronger generated-secret rule applies only when
+  `NODE_ENV=production` or `COOKIE_SECURE=true`, neither of which the E2E backend
+  sets.
+- `AUTH_RATE_LIMIT_MAX=600`. The limiter meters `/api/auth/*` per IP and counts
+  every token refresh, so a full suite from a single loopback address exhausts the
+  production default of 60 per minute and returns a `429` in the middle of an
+  unrelated assertion. **The production default is unchanged at 60**, and the
+  limiter's real behaviour, including the `429`, is covered by the backend
+  integration tests at that default. The CRM and notification integration suites
+  raise it the same way.
+
+Both are overridable from the environment when a run needs the real values.
 
 Useful env:
 

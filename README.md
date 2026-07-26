@@ -14,6 +14,9 @@ This repository was initialized from the [Vibe Coding Template](https://github.c
 - Deployment is outside MVP. No cloud account setup, no production secrets, and no remote Git publication are in scope. `.do/` specs and `docs/DEPLOYMENT.md` stay committed for a later release decision.
 - Validation scope for the active surfaces: `bun run test:contracts`, `bun run architecture:check`, `bun run test:deploy`, `bun run test:backend`, `bun run test:webapp`, and `bun run typecheck`. `test:deploy` is the only suite covering `scripts/repo-env.test.mjs` and `scripts/architecture-check.test.mjs`, and CI runs it.
 - Business rules that apply repository-wide: all UI copy, stage labels, task types, loss reasons, and validation feedback are in Russian; the business time zone is Europe/Kyiv; money is stored as PostgreSQL `Decimal(14,2)` and exposed as decimal strings in UAH.
+- The normal CRM interface never deletes a client, deal, task, or timeline entry. Deals leave the funnel by being closed as won or lost and their history stays. There is no delete endpoint for those records, and `ON DELETE RESTRICT` on `deal_activities` and `ingestion_receipts` makes a direct database deletion fail loudly. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
+- Every role, including administrator, lands on `/app` after signing in. The owner is the administrator of the only account a Teraso deployment has, and the CRM is the daily surface; `/admin` stays reachable from the sidebar for the rare account change.
+- The dashboard's «Задач на сегодня» and «Просроченных задач» tiles count tasks (PRD 7.8) and link to `/app/tasks`. One deal can carry several tasks, so a deal-filtered list would show a different number from the one that was clicked.
 - `backend/.env` and `webapp/.env` are local-only files created from their `.env.example` siblings. They are gitignored and must never be committed.
 
 ## What's Inside
@@ -22,7 +25,9 @@ This repository was initialized from the [Vibe Coding Template](https://github.c
 - `webapp` - React + Vite + TanStack Query/Form/Router CSR browser client with the baseline auth flow.
 - `packages/contracts` - shared Zod schemas and TypeScript API types.
 - `docker-compose.yml` - local PostgreSQL 18 through the official `postgres:18-alpine` image on port `54329`; test runners use a repository-derived port by default, or `POSTGRES_TEST_PORT` when set. PostgreSQL 18 is intentional because the backend schema uses strict database-generated UUIDv7 IDs.
-- `docs/TESTING.md` - the backend and Playwright testing contract.
+- `docs/TESTING.md` - the backend and Playwright testing contract, including the CRM end-to-end journey.
+- `docs/CRM_INTEGRATION.md` - the signed quiz-lead webhook contract for `teraso.com.ua`.
+- `docs/OPERATIONS.md` - the operator runbook: production variable names, the scheduler, verifying the site integration, backups and incident recovery, and known defects.
 - `docs/LOCAL_DATABASE.md` - cross-platform local PostgreSQL setup for Windows, macOS, and Linux.
 - `website` - a separate Astro project for public SSG/SSR pages. **(deferred surface)**
 - `mobile/README.md` - a pointer to the upstream template's Expo mobile line. **(deferred surface)** This repository has a single branch, `main`; the `mobile` branch it describes exists only in the upstream template repository, which is not configured as a remote here.
@@ -146,7 +151,8 @@ VITE_API_URL=http://localhost:3000
 - `bun run test:webapp` - run webapp client tests.
 - `bun run test:website` - run Astro website tests. **(deferred surface)**
 - `bun run deploy:do:specs` - generate concrete DigitalOcean specs under `.scratch/deploy`. **(deployment is out of MVP scope)**
-- `bun run e2e:webapp` - run the Playwright auth smoke test through backend + Vite.
+- `bun run e2e:webapp` - run the Playwright suite (auth, RBAC, and the CRM quiz-lead journey) through backend + Vite.
+- `bun run e2e:webapp -- --grep "quiz lead reaches success"` - run only the CRM end-to-end journey.
 - `bun run --cwd backend prisma:generate` - generate the Prisma client. Required on a fresh checkout.
 - `bun run --cwd backend prisma:migrate` - create/apply a Prisma migration in development.
 - `bun run --cwd backend prisma:deploy` - apply existing Prisma migrations on a server.
@@ -156,6 +162,8 @@ VITE_API_URL=http://localhost:3000
 ## Project READMEs
 
 - [backend/README.md](backend/README.md) - API, auth, Prisma, and backend validation.
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) - running the CRM: production variable names, the notification scheduler, verifying the site webhook, backups and incident recovery, and known defects.
+- [docs/CRM_INTEGRATION.md](docs/CRM_INTEGRATION.md) - the signed quiz-lead webhook contract for the site.
 - [docs/LOCAL_DATABASE.md](docs/LOCAL_DATABASE.md) - Docker Compose PostgreSQL setup and reset workflow.
 - [webapp/README.md](webapp/README.md) - CSR browser client setup, env, and Playwright smoke.
 - [packages/contracts/README.md](packages/contracts/README.md) - shared schema and DTO rules.
@@ -176,7 +184,7 @@ The backend API flow is `route -> validation -> auth/session guard -> service ->
 
 Keep the default architecture monolithic. The rest of this paragraph describes production deployment, which is **out of MVP scope**; it is retained for a later release decision. For DigitalOcean production, the backend/API default is one `apps-s-1vcpu-1gb` App Platform container so a new project starts inside the expected low-cost budget with Managed PostgreSQL while retaining a clear scale-up path. Add backend worker or scheduled-job components from the same Docker image only when a concrete background or periodic task exists; the deployment generator refuses to deploy the empty worker placeholder. For real-time features, a single backend instance can own its local WebSocket connections. If the backend is horizontally scaled and users connected to different instances must receive the same chat, presence, or live events, add a managed Redis-compatible Pub/Sub broker between instances, using DigitalOcean Managed Valkey on the default path or Yandex Managed Service for Valkey when Yandex Cloud is explicitly selected.
 
-Ongoing engineering guidance lives in [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/TESTING.md](docs/TESTING.md), and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). This README owns the project's durable decisions and local setup: see "Project Setup Decisions" and "Quick Start".
+Ongoing engineering guidance lives in [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/TESTING.md](docs/TESTING.md), and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Running the system — required variable names, the notification scheduler, verifying the site webhook, backups, and known defects — lives in [docs/OPERATIONS.md](docs/OPERATIONS.md). This README owns the project's durable decisions and local setup: see "Project Setup Decisions" and "Quick Start".
 
 ## Current Upstream Documentation
 
