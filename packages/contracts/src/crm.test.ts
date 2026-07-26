@@ -10,7 +10,12 @@ import type {
   DealTaskDto,
 } from './crm'
 import {
+  ACTIVE_DEAL_STAGES,
+  DASHBOARD_SOURCE_LIMIT,
+  FUNNEL_TRANSITIONS,
+  dashboardFunnelStepSchema,
   dashboardPeriodSchema,
+  dashboardSchema,
   dealActivityMetadataSchema,
   dealActivitySchema,
   dealBoardQuerySchema,
@@ -546,6 +551,106 @@ describe('dashboard periods', () => {
         period: 'custom',
         from: '2026-07-01T00:00:00.000Z',
         to: '2026-07-23T00:00:00.000Z',
+      }),
+    ).toThrow()
+  })
+})
+
+describe('dashboard report', () => {
+  const report = {
+    range: { period: 'month', from: '2026-06-24', to: '2026-07-23' },
+    openPipelineAmount: '65000.00',
+    prepaymentReceivedAmount: '20000.00',
+    wonPaymentAmount: '80000.00',
+    wonDealCount: 1,
+    newLeadCount: 4,
+    tasksDueTodayCount: 0,
+    overdueTaskCount: 0,
+    noNextStepDealCount: 2,
+    criticalDealCount: 0,
+    funnel: FUNNEL_TRANSITIONS.map((transition) => ({ ...transition, count: 0, share: 0 })),
+    sources: [
+      {
+        source: 'teraso.com.ua',
+        utmSource: null,
+        leadCount: 2,
+        openPipelineAmount: '65000.00',
+        wonCount: 0,
+        wonAmount: '0.00',
+      },
+    ],
+  } as const
+
+  test('accepts a complete report and rejects an unknown key', () => {
+    expect(dashboardSchema.parse(report)).toMatchObject({
+      openPipelineAmount: '65000.00',
+      prepaymentReceivedAmount: '20000.00',
+      wonPaymentAmount: '80000.00',
+    })
+    expect(() => dashboardSchema.parse({ ...report, averageDealSize: '1000.00' })).toThrow()
+  })
+
+  /**
+   * Every amount is summed in PostgreSQL and serialized through `toMoneyString`.
+   * The response form requires exactly two decimals, so a total that skipped
+   * that conversion — a raw `Decimal.toString()` yields "65000" — fails here
+   * rather than rendering as a second spelling of the same money.
+   */
+  test('requires canonical two-decimal money everywhere, including zero', () => {
+    expect(() => dashboardSchema.parse({ ...report, wonPaymentAmount: '80000' })).toThrow()
+    expect(() => dashboardSchema.parse({ ...report, openPipelineAmount: 65000 })).toThrow()
+    expect(dashboardSchema.parse({ ...report, wonPaymentAmount: '0.00' }).wonPaymentAmount).toBe(
+      '0.00',
+    )
+  })
+
+  test('derives the funnel pairs from the board order so the two cannot drift', () => {
+    expect(FUNNEL_TRANSITIONS).toEqual([
+      { fromStage: 'NEW', toStage: 'QUALIFIED' },
+      { fromStage: 'QUALIFIED', toStage: 'PROPOSAL_SENT' },
+      { fromStage: 'PROPOSAL_SENT', toStage: 'PREPAYMENT' },
+      { fromStage: 'PREPAYMENT', toStage: 'WON' },
+    ])
+    expect(FUNNEL_TRANSITIONS).toHaveLength(ACTIVE_DEAL_STAGES.length - 1)
+    // LOST never occupies a column, so it is never a funnel destination either.
+    expect(FUNNEL_TRANSITIONS.some((step) => step.toStage === 'LOST')).toBe(false)
+  })
+
+  test('keeps a conversion share a fraction and counts whole', () => {
+    const step = { fromStage: 'NEW', toStage: 'QUALIFIED', count: 3 } as const
+
+    expect(dashboardFunnelStepSchema.parse({ ...step, share: 0.75 }).share).toBe(0.75)
+    expect(() => dashboardFunnelStepSchema.parse({ ...step, share: 75 })).toThrow()
+    expect(() => dashboardFunnelStepSchema.parse({ ...step, share: -0.1 })).toThrow()
+    expect(() => dashboardFunnelStepSchema.parse({ ...step, count: 2.5, share: 0.5 })).toThrow()
+  })
+
+  /** Cheap traffic can invent unbounded `utm_source` values, so the table is capped. */
+  test('caps the source breakdown', () => {
+    const row = report.sources[0]!
+    const overLimit = Array.from({ length: DASHBOARD_SOURCE_LIMIT + 1 }, (_, index) => ({
+      ...row,
+      source: `source-${index}`,
+    }))
+
+    expect(() => dashboardSchema.parse({ ...report, sources: overLimit })).toThrow()
+    expect(
+      dashboardSchema.parse({ ...report, sources: overLimit.slice(0, DASHBOARD_SOURCE_LIMIT) })
+        .sources,
+    ).toHaveLength(DASHBOARD_SOURCE_LIMIT)
+  })
+
+  /** The resolved window is echoed back so the browser never recomputes Kyiv days. */
+  test('echoes the resolved window as calendar dates', () => {
+    expect(dashboardSchema.parse(report).range).toEqual({
+      period: 'month',
+      from: '2026-06-24',
+      to: '2026-07-23',
+    })
+    expect(() =>
+      dashboardSchema.parse({
+        ...report,
+        range: { period: 'month', from: '2026-06-24T00:00:00.000Z', to: '2026-07-23' },
       }),
     ).toThrow()
   })

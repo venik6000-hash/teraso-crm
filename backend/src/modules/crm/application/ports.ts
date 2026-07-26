@@ -2,6 +2,8 @@ import type {
   ClientDetailDto,
   ClientLookupResponse,
   CriticalTasksResponse,
+  DashboardDto,
+  DashboardPeriod,
   DealActivityDto,
   DealBoardQuery,
   DealBoardResponse,
@@ -31,6 +33,11 @@ import type {
 export type CrmRepository = {
   listDeals(query: DealListQuery, now: Date): Promise<DealListPage>
   listBoard(query: DealBoardQuery, now: Date): Promise<DealBoardResponse>
+  /**
+   * The dashboard report (PRD 7.8). Every total is summed in PostgreSQL and
+   * arrives already serialized, so no caller adds money up in JavaScript.
+   */
+  reportDashboard(period: DashboardPeriod, now: Date): Promise<DashboardDto>
   findDeal(dealId: string, now: Date): Promise<DealDetailDto | null>
   createDeal(command: DealCreateCommand): Promise<DealDetailDto>
   updateDeal(command: DealUpdateCommand): Promise<DealDetailDto | null>

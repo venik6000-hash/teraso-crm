@@ -1,19 +1,27 @@
 import {
   DEALS_MAX_PAGE,
+  OPEN_DEAL_STAGES,
+  dashboardPeriodSchema,
+  dealBoardQuerySchema,
   dealListQuerySchema,
+  taskCreateSchema,
+  type DashboardPeriodKind,
   type DealListQuery,
   type DealActivityKind,
+  type DealDetailDto,
   type DealStage,
   type DealSortField,
   type LeadClass,
   type LossReason,
   type Material,
   type PreferredChannel,
+  type TaskCreateInput,
   type TaskKind,
   type TaskStatus,
 } from '@teraso-crm/contracts'
 
 import { urlQueryState } from '@/platform/url-query-state'
+import { toFormErrors, type FormErrors } from './validation'
 
 /* ------------------------------------------------------------------ *
  * Destinations
@@ -505,6 +513,137 @@ export function dealListPager({
       ? `Страница ${page} пуста — вернитесь к первой странице`
       : `Страница ${page} · показано ${shown} из ${total}`,
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Dashboard (PRD 7.8)
+ * ------------------------------------------------------------------ */
+
+export const DASHBOARD_PERIOD_LABELS: Record<DashboardPeriodKind, string> = {
+  today: 'Сегодня',
+  week: 'Неделя',
+  month: 'Месяц',
+  custom: 'Период',
+}
+
+const DASHBOARD_PERIOD_KEYS = ['period', 'from', 'to'] as const
+
+const dashboardUrlState = urlQueryState(dashboardPeriodSchema, DASHBOARD_PERIOD_KEYS)
+
+/** Raw URL search values -> a complete, valid period. */
+export const parseDashboardPeriod = dashboardUrlState.parse
+
+/** Only what differs from the default month view reaches the address bar. */
+export const toDashboardPeriodSearch = dashboardUrlState.serialize
+
+/** The route's `validateSearch`: a stale link degrades to the default period. */
+export const cleanDashboardPeriodSearch = dashboardUrlState.clean
+
+/**
+ * A conversion share as a whole percentage.
+ *
+ * The server sends a fraction because a percentage is a presentation choice;
+ * rounding here keeps the funnel readable without ever letting the browser
+ * recompute the ratio from two counts.
+ */
+export function formatShare(share: number) {
+  return `${Math.round(share * 100)}%`
+}
+
+/* ------------------------------------------------------------------ *
+ * Board (PRD 7.6)
+ * ------------------------------------------------------------------ */
+
+/**
+ * The board's URL state.
+ *
+ * It reuses the list's filter keys minus paging and sorting — the board has
+ * neither — through the same `urlQueryState` helper, so a filter arriving from
+ * the dashboard's «критичных» counter is honoured identically on both surfaces.
+ */
+const DEAL_BOARD_QUERY_KEYS = DEAL_LIST_QUERY_KEYS.filter(
+  (key): key is Exclude<(typeof DEAL_LIST_QUERY_KEYS)[number], 'page' | 'pageSize' | 'sort' | 'direction'> =>
+    key !== 'page' && key !== 'pageSize' && key !== 'sort' && key !== 'direction',
+)
+
+const dealBoardUrlState = urlQueryState(dealBoardQuerySchema, DEAL_BOARD_QUERY_KEYS)
+
+export const parseDealBoardSearch = dealBoardUrlState.parse
+export const toDealBoardSearch = dealBoardUrlState.serialize
+export const cleanDealBoardSearch = dealBoardUrlState.clean
+
+/**
+ * What a drop should do, decided from the two stages alone.
+ *
+ * This chooses which CONFIRMATION to open, never whether the move is allowed.
+ * The reachable-stage graph lives on the server and a copy of it here is exactly
+ * how the two would drift, so even a backwards drag is offered to the API — the
+ * rejection «Недопустимый переход воронки» comes back, the card never leaves its
+ * column, and there is one authority for the funnel instead of two.
+ */
+export type BoardDropIntent =
+  | { kind: 'ignored' }
+  | { kind: 'stage'; stage: DealStage }
+  | { kind: 'payment'; stage: 'PREPAYMENT' | 'WON' }
+  | { kind: 'loss' }
+
+export function boardDropIntent(currentStage: DealStage, target: DealStage): BoardDropIntent {
+  if (currentStage === target) return { kind: 'ignored' }
+  if (target === 'LOST') return { kind: 'loss' }
+  // Both paid stages require an amount and a date the contract will not accept
+  // as absent, so the card cannot commit without asking (PRD 7.3).
+  if (target === 'PREPAYMENT' || target === 'WON') return { kind: 'payment', stage: target }
+  return { kind: 'stage', stage: target }
+}
+
+/* ------------------------------------------------------------------ *
+ * Tasks (PRD 7.4)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Turns the task form's draft into a validated payload or Russian field errors.
+ *
+ * The time arrives as the `YYYY-MM-DDTHH:mm` a date-time input produces, which
+ * is Kyiv wall-clock time, and leaves as the UTC instant the contract requires.
+ * An empty input converts to `''`, which fails the contract's datetime format
+ * and surfaces as «Укажите дату и время» — the mandatory-time rule of PRD 7.4
+ * enforced by the shared schema rather than by a second check here.
+ */
+export type TaskDraft = {
+  assigneeUserId?: string
+  dueAtInput: string
+  kind: TaskKind
+  title: string
+}
+
+export function buildTaskInput(
+  draft: TaskDraft,
+): { ok: true; value: TaskCreateInput } | { ok: false; errors: FormErrors } {
+  const parsed = taskCreateSchema.safeParse({
+    kind: draft.kind,
+    title: draft.title.trim(),
+    dueAt: toInstantFromKyivInput(draft.dueAtInput),
+    ...(draft.assigneeUserId ? { assigneeUserId: draft.assigneeUserId } : {}),
+  })
+
+  return parsed.success
+    ? { ok: true, value: parsed.data }
+    : { ok: false, errors: toFormErrors(parsed.error.issues) }
+}
+
+/**
+ * Whether completing a task should prompt for the next step.
+ *
+ * PRD 7.4 is explicit that finishing a task does not satisfy the rule: an open
+ * deal still needs a future one. This reads the deal's own task list rather than
+ * the clock, so it is not a third copy of the urgency rule — `noNextStep`,
+ * `hasOverdueTask` and `isCritical` remain server-computed and authoritative,
+ * and this only decides whether to open a dialog a moment earlier than the
+ * refetched flags would.
+ */
+export function shouldPromptNextStep(deal: DealDetailDto, completedTaskId: string): boolean {
+  if (!OPEN_DEAL_STAGES.some((stage) => stage === deal.stage)) return false
+  return deal.tasks.every((task) => task.id === completedTaskId || task.status !== 'ACTIVE')
 }
 
 /* ------------------------------------------------------------------ *

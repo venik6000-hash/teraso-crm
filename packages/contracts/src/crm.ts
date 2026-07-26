@@ -391,6 +391,26 @@ export const dashboardPeriodSchema = z
     }
   })
 
+/**
+ * Adjacent funnel pairs, derived from ACTIVE_DEAL_STAGES rather than restated.
+ *
+ * The dashboard funnel reports exactly these four transitions (PRD 7.8 item 5),
+ * so deriving them means a change to the funnel order cannot leave the report
+ * describing a shape the board no longer has.
+ */
+export const FUNNEL_TRANSITIONS = ACTIVE_DEAL_STAGES.slice(0, -1).map((stage, index) => ({
+  fromStage: stage,
+  toStage: ACTIVE_DEAL_STAGES[index + 1]!,
+})) as ReadonlyArray<{ fromStage: DealStage; toStage: DealStage }>
+
+/**
+ * Rows in the dashboard's source breakdown. Cheap traffic can invent an
+ * unbounded number of `utm_source` values, so the response is capped for the
+ * same reason the deal-detail collections are: a bounded payload, with room to
+ * add paging later without a breaking shape change.
+ */
+export const DASHBOARD_SOURCE_LIMIT = 50
+
 /* ------------------------------------------------------------------ *
  * Inbound quiz lead (site webhook)
  * ------------------------------------------------------------------ */
@@ -631,6 +651,114 @@ export const criticalTasksResponseSchema = z
   .strict()
 
 /* ------------------------------------------------------------------ *
+ * Dashboard (PRD 7.8)
+ *
+ * Every amount below is summed in PostgreSQL over Decimal columns and serialized
+ * through the same `toMoneyString` the rest of the CRM uses. None of it is
+ * totalled in the browser: JavaScript numbers cannot hold a 14,2 decimal without
+ * loss, and a dashboard that disagrees with the deal cards about how much money
+ * came in is worse than no dashboard.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The resolved window the server actually reported on.
+ *
+ * `today`, `week` and `month` are trailing windows ending on the current Kyiv
+ * day rather than calendar buckets, so the dashboard is never empty on the first
+ * of a month. Echoing the resolved dates back means the screen can name the
+ * window it is showing without recomputing Kyiv day boundaries in the browser.
+ */
+export const dashboardRangeSchema = z
+  .object({
+    period: dashboardPeriodKindSchema,
+    from: isoDateSchema,
+    to: isoDateSchema,
+  })
+  .strict()
+
+/**
+ * One adjacent-stage transition over the period (PRD 7.8 item 5).
+ *
+ * `count` is the number of STAGE_CHANGED activities recording this exact move
+ * inside the window — the funnel measures MOVEMENT, not the current stage
+ * snapshot, so a deal that reached WON before the period started does not
+ * inflate it and a deal that moved twice is counted twice. A REOPENED activity
+ * is deliberately excluded: it writes no `fromStage`/`toStage` pair at all
+ * (see dealActivitySchema), so an administrative correction never reads as a
+ * conversion.
+ *
+ * `share` is normalized against the FIRST transition in the funnel, not against
+ * the immediately preceding one. That is the only normalization under which all
+ * four numbers are comparable on one chart, and step-to-step conversion is still
+ * recoverable by dividing adjacent counts, whereas the reverse is not.
+ */
+export const dashboardFunnelStepSchema = z
+  .object({
+    fromStage: dealStageSchema,
+    toStage: dealStageSchema,
+    count: z.number().int().nonnegative(),
+    share: z.number().min(0).max(1),
+  })
+  .strict()
+
+/**
+ * One source/UTM row (PRD 7.8 item 6).
+ *
+ * The three measures answer deliberately different questions, which is why they
+ * cannot share one window: `leadCount` and the two `won` figures are period
+ * measures, while `openPipelineAmount` is a snapshot of money still in play
+ * right now. A source that brought nothing this month but still holds open deals
+ * is exactly the row the owner needs to see.
+ */
+export const dashboardSourceSchema = z
+  .object({
+    source: z.string(),
+    utmSource: z.string().nullable(),
+    leadCount: z.number().int().nonnegative(),
+    openPipelineAmount: moneyResponseSchema,
+    wonCount: z.number().int().nonnegative(),
+    wonAmount: moneyResponseSchema,
+  })
+  .strict()
+
+/**
+ * The six dashboard blocks of PRD 7.8, in one response.
+ *
+ * The period and snapshot measures are mixed on purpose and the distinction is
+ * load-bearing:
+ *
+ * - `openPipelineAmount` and the four operational counters are SNAPSHOTS of the
+ *   present. Open pipeline is money not yet won, which has no date to fall
+ *   inside a window, and an overdue task is overdue now or not at all.
+ * - `prepaymentReceivedAmount`, `wonPaymentAmount`, `wonDealCount`,
+ *   `newLeadCount` and the funnel are PERIOD measures.
+ *
+ * Received money is attributed by its own payment date rather than by the deal's
+ * stage, which is what keeps a prepayment from being reported as a win: a deal
+ * sitting in PREPAYMENT contributes to `prepaymentReceivedAmount` only, and once
+ * it is fully paid it contributes to both — each on the date that payment
+ * actually landed.
+ */
+export const dashboardSchema = z
+  .object({
+    range: dashboardRangeSchema,
+    openPipelineAmount: moneyResponseSchema,
+    prepaymentReceivedAmount: moneyResponseSchema,
+    wonPaymentAmount: moneyResponseSchema,
+    wonDealCount: z.number().int().nonnegative(),
+    newLeadCount: z.number().int().nonnegative(),
+    tasksDueTodayCount: z.number().int().nonnegative(),
+    overdueTaskCount: z.number().int().nonnegative(),
+    noNextStepDealCount: z.number().int().nonnegative(),
+    criticalDealCount: z.number().int().nonnegative(),
+    funnel: z.array(dashboardFunnelStepSchema),
+    sources: z.array(dashboardSourceSchema).max(DASHBOARD_SOURCE_LIMIT),
+  })
+  .strict()
+
+export const dashboardResponseSchema = z.object({ report: dashboardSchema }).strict()
+
+/* ------------------------------------------------------------------ *
  * Types
  * ------------------------------------------------------------------ */
 
@@ -685,3 +813,8 @@ export type DealBoardColumnDto = z.infer<typeof dealBoardColumnSchema>
 export type DealBoardResponse = z.infer<typeof dealBoardResponseSchema>
 export type CriticalTaskDto = z.infer<typeof criticalTaskSchema>
 export type CriticalTasksResponse = z.infer<typeof criticalTasksResponseSchema>
+export type DashboardRangeDto = z.infer<typeof dashboardRangeSchema>
+export type DashboardFunnelStepDto = z.infer<typeof dashboardFunnelStepSchema>
+export type DashboardSourceDto = z.infer<typeof dashboardSourceSchema>
+export type DashboardDto = z.infer<typeof dashboardSchema>
+export type DashboardResponse = z.infer<typeof dashboardResponseSchema>

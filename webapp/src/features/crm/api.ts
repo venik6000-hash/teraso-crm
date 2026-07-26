@@ -1,19 +1,31 @@
 import {
   clientLookupQuerySchema,
   clientLookupResponseSchema,
+  criticalTasksResponseSchema,
+  dashboardPeriodSchema,
+  dashboardResponseSchema,
   dealActivityResponseSchema,
+  dealBoardQuerySchema,
+  dealBoardResponseSchema,
   dealCreateSchema,
   dealDetailResponseSchema,
   dealListQuerySchema,
   dealListResponseSchema,
   dealNoteCreateSchema,
   dealStageChangeSchema,
+  dealTaskResponseSchema,
   dealUpdateSchema,
+  taskCreateSchema,
+  taskUpdateSchema,
+  type DashboardPeriod,
+  type DealBoardQuery,
   type DealCreateInput,
   type DealListQuery,
   type DealStageChangeInput,
   type DealUpdateInput,
   type NoteCreateInput,
+  type TaskCreateInput,
+  type TaskUpdateInput,
 } from '@teraso-crm/contracts'
 
 import type { AuthenticatedTransport } from '@/platform/api'
@@ -38,6 +50,63 @@ export function listDeals(transport: AuthenticatedTransport, input: DealListQuer
     `${CRM_BASE}/deals?${dealFilterParams(query)}`,
     dealListResponseSchema,
   )
+}
+
+/**
+ * The board. It is the same endpoint and the same filter vocabulary as the
+ * list — `dealBoardQuerySchema` is the list query without paging and sorting —
+ * so urgency is computed once on the server and both views agree.
+ */
+export function getBoard(transport: AuthenticatedTransport, input: DealBoardQuery) {
+  const query = dealBoardQuerySchema.parse(input)
+  return transport.request(
+    `${CRM_BASE}/deals/board?${dealFilterParams(query)}`,
+    dealBoardResponseSchema,
+  )
+}
+
+/** The dashboard report. Every total arrives already summed in PostgreSQL. */
+export async function getDashboard(
+  transport: AuthenticatedTransport,
+  input: DashboardPeriod,
+) {
+  const query = dashboardPeriodSchema.parse(input)
+  const response = await transport.request(
+    `${CRM_BASE}/dashboard?${dealFilterParams(query)}`,
+    dashboardResponseSchema,
+  )
+  return response.report
+}
+
+/** Overdue tasks on open deals, ordered by the server. */
+export function listCriticalTasks(transport: AuthenticatedTransport) {
+  return transport.request(`${CRM_BASE}/tasks/critical`, criticalTasksResponseSchema)
+}
+
+export async function createDealTask(
+  transport: AuthenticatedTransport,
+  dealId: string,
+  input: TaskCreateInput,
+) {
+  const response = await transport.request(
+    `${CRM_BASE}/deals/${encodeURIComponent(dealId)}/tasks`,
+    dealTaskResponseSchema,
+    { method: 'POST', body: taskCreateSchema.parse(input) },
+  )
+  return response.task
+}
+
+export async function updateDealTask(
+  transport: AuthenticatedTransport,
+  taskId: string,
+  input: TaskUpdateInput,
+) {
+  const response = await transport.request(
+    `${CRM_BASE}/tasks/${encodeURIComponent(taskId)}`,
+    dealTaskResponseSchema,
+    { method: 'PATCH', body: taskUpdateSchema.parse(input) },
+  )
+  return response.task
 }
 
 export async function getDeal(transport: AuthenticatedTransport, dealId: string) {
@@ -113,7 +182,7 @@ export function lookupClient(transport: AuthenticatedTransport, phone: string) {
  * than sent as empty or `false`: the shared filter flags treat `false` as "no
  * constraint" anyway, and a short URL stays shareable.
  */
-function dealFilterParams(query: DealListQuery) {
+function dealFilterParams(query: Record<string, unknown>) {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {
     if (value === undefined || value === null || value === '' || value === false) continue

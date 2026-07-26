@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 import type {
   ClientDetailDto,
   ClientLookupResponse,
+  DashboardDto,
+  DashboardPeriod,
   DealActivityDto,
   DealBoardResponse,
   DealDetailDto,
@@ -45,6 +47,7 @@ type RecordedCalls = {
   lookupClientByPhone: Array<{ phoneNormalized: string; now: Date }>
   listDeals: Array<{ now: Date }>
   listBoard: Array<{ now: Date }>
+  reportDashboard: Array<{ period: DashboardPeriod; now: Date }>
 }
 
 function createRepository(overrides: Partial<CrmRepository> = {}) {
@@ -57,6 +60,7 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
     lookupClientByPhone: [],
     listDeals: [],
     listBoard: [],
+    reportDashboard: [],
   }
   const repository: CrmRepository = {
     listDeals: async (_query, at) => {
@@ -66,6 +70,10 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
     listBoard: async (_query, at) => {
       calls.listBoard.push({ now: at })
       return { columns: [] } as DealBoardResponse
+    },
+    reportDashboard: async (period, at) => {
+      calls.reportDashboard.push({ period, now: at })
+      return { range: { period: period.period, from: '2026-07-01', to: '2026-07-23' } } as DashboardDto
     },
     findDeal: async () => null,
     createDeal: async (command) => {

@@ -47,6 +47,7 @@ import {
   type DealSummaryRow,
   type TaskRow,
 } from './deal-mappers'
+import { queryDashboard } from './dashboard-query'
 import {
   activeStagesSql,
   listConditions,
@@ -171,6 +172,15 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
           return { stage, totalCount: dealsForStage.length, deals: dealsForStage }
         }),
       } satisfies DealBoardResponse
+    },
+
+    /**
+     * The dashboard report. It lives in its own query module because it shares
+     * nothing with the list beyond the urgency predicates it imports from
+     * there — the list selects rows, this one only ever returns aggregates.
+     */
+    reportDashboard(period, now) {
+      return queryDashboard(db, period, now)
     },
 
     findDeal(dealId, now) {

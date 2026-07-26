@@ -77,8 +77,21 @@ export function navigationItemsForWorkspace(
   return [...adminNavigation, { label: 'CRM', to: '/app/deals' }]
 }
 
-export function homePathForRole(role: UserRole): '/app' | '/admin' {
-  return role === 'admin' ? '/admin' : '/app'
+/**
+ * Where an account lands after signing in.
+ *
+ * Every role lands in the CRM, including the administrator. The owner IS the
+ * administrator of the only account a Teraso deployment has, and the CRM — not
+ * user management — is the product they open the app to use: leads, the board
+ * and today's critical tasks. `/admin` stays reachable from the sidebar for the
+ * rare account change.
+ *
+ * The two workspaces are deliberately not the two roles (see `WorkspaceKind`),
+ * so this returning `/app` for an administrator is consistent with the access
+ * rule rather than an exception to it.
+ */
+export function homePathForRole(_role: UserRole): '/app' {
+  return '/app'
 }
 
 export function resolveRoleDestination(

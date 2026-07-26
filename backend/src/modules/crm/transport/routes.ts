@@ -5,6 +5,8 @@ import {
   clientLookupResponseSchema,
   clientParamsSchema,
   criticalTasksResponseSchema,
+  dashboardPeriodSchema,
+  dashboardResponseSchema,
   dealActivityResponseSchema,
   dealBoardQuerySchema,
   dealBoardResponseSchema,
@@ -178,6 +180,22 @@ const criticalTasksRoute = createRoute({
   },
 })
 
+/**
+ * The owner's report (PRD 7.8). A GET with no body, so it is outside the write
+ * rate limiter and the dashboard can be refreshed freely while working.
+ */
+const getDashboardRoute = createRoute({
+  method: 'get',
+  path: '/dashboard',
+  security: bearerSecurity,
+  request: { query: dashboardPeriodSchema },
+  responses: {
+    200: { ...jsonBody(dashboardResponseSchema), description: 'Sales report for the period' },
+    400: { content: errorContent, description: 'Invalid period' },
+    401: { content: errorContent, description: 'Authentication required' },
+  },
+})
+
 const lookupClientRoute = createRoute({
   method: 'get',
   path: '/clients/lookup',
@@ -232,6 +250,7 @@ export function createCrmRoutes({ requireAuth, service, taskService }: CreateCrm
   routes.use('/tasks', requireAuth)
   routes.use('/tasks/*', requireAuth)
   routes.use('/clients/*', requireAuth)
+  routes.use('/dashboard', requireAuth)
 
   routes.openapi(listDealsRoute, async (c) => {
     return c.json(await executeCrm(() => service.listDeals(c.req.valid('query'), c.var.user)), 200)
@@ -292,6 +311,11 @@ export function createCrmRoutes({ requireAuth, service, taskService }: CreateCrm
       taskService.updateTask(c.req.valid('param').taskId, c.req.valid('json'), c.var.user),
     )
     return c.json({ task }, 200)
+  })
+
+  routes.openapi(getDashboardRoute, async (c) => {
+    const report = await executeCrm(() => service.getDashboard(c.req.valid('query'), c.var.user))
+    return c.json({ report }, 200)
   })
 
   /**

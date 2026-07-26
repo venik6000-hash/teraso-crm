@@ -106,7 +106,8 @@ export function UserHomePage() {
 }
 
 export function CrmDashboardRoutePage() {
-  return <CrmDashboardPage />
+  const search = useSearch({ from: '/userWorkspace/app/dashboard' })
+  return <CrmDashboardPage search={search} />
 }
 
 /**
@@ -126,7 +127,8 @@ export function CrmDealRoutePage() {
 }
 
 export function CrmBoardRoutePage() {
-  return <CrmBoardPage />
+  const search = useSearch({ from: '/userWorkspace/app/board' })
+  return <CrmBoardPage search={search} />
 }
 
 export function CrmTasksRoutePage() {

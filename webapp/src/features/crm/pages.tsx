@@ -1,12 +1,25 @@
 import { useNavigate } from '@tanstack/react-router'
-import type { DealCreateInput, DealListQuery } from '@teraso-crm/contracts'
+import {
+  dashboardPeriodKindSchema,
+  type CriticalTaskDto,
+  type DashboardDto,
+  type DashboardPeriod,
+  type DealBoardQuery,
+  type DealCreateInput,
+  type DealListQuery,
+  type DealStage,
+  type DealStageChangeInput,
+  type DealSummaryDto,
+} from '@teraso-crm/contracts'
 import { useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 
 import { PageContainer, PageHeader } from '@/components/PageLayout'
 import { DataTableFrame } from '@/components/dashboard'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Toggle } from '@/components/ui/toggle'
 import {
   Empty,
   EmptyDescription,
@@ -23,36 +36,66 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Typography } from '@/components/typography'
 import { useAuth } from '@/features/auth'
+import {
+  NotificationBell,
+  NotificationInbox,
+  PushPermissionCard,
+  useMarkNotificationsReadMutation,
+  useNotificationInboxQuery,
+  usePushSubscription,
+} from '@/features/notifications'
 import { CommandSearch } from './components/CommandSearch'
+import { DashboardMetrics } from './components/DashboardMetrics'
+import { DealBoard } from './components/DealBoard'
 import { DealDetail } from './components/DealDetail'
 import { DealFilterBar } from './components/DealFilterBar'
 import { DealForm } from './components/DealForm'
 import { DealList } from './components/DealList'
+import { CrmTextField } from './components/CrmField'
+import { FunnelChart } from './components/FunnelChart'
+import { SourcePerformanceTable } from './components/SourcePerformanceTable'
+import { StageCommitDialog } from './components/StageCommitDialog'
+import { TaskDialog } from './components/TaskDialog'
+import { TaskQueue } from './components/TaskQueue'
 import {
+  DASHBOARD_PERIOD_LABELS,
   DEAL_DETAIL_ROUTE_PATH,
+  DEAL_STAGE_LABELS,
+  activeDealFilters,
   dealListPager,
   dealListViewState,
+  parseDashboardPeriod,
+  parseDealBoardSearch,
   parseDealListSearch,
+  shouldPromptNextStep,
+  toDashboardPeriodSearch,
+  toDealBoardSearch,
   toDealListSearch,
+  type BoardDropIntent,
 } from './model'
 import {
   useAddDealNoteMutation,
   useChangeDealStageMutation,
   useClientLookupQuery,
   useCreateDealMutation,
+  useCreateTaskMutation,
+  useCriticalTasksQuery,
+  useDashboardQuery,
+  useDealBoardQuery,
   useDealQuery,
   useDealListQuery,
   useUpdateDealMutation,
+  useUpdateTaskMutation,
 } from './queries'
 
 /**
- * The CRM screens.
+ * The CRM screens: dashboard, list, card, board, task queue and notifications.
  *
- * List state lives in the URL, so a filtered view is shareable and the browser's
- * back button behaves. `/app/board`, `/app/tasks`, `/app/dashboard` and
- * `/app/notifications` are routed here as named placeholders — Task 8 fills
- * them — so the navigation, the notification destinations and the shell are
- * complete now instead of half-wired.
+ * List, board and dashboard state lives in the URL, so a filtered view or a
+ * chosen period is shareable and the browser's back button behaves.
+ *
+ * Money and urgency are rendered exactly as the API served them. No screen here
+ * sums an amount or compares a due time with the browser clock.
  */
 
 export function DealsPage({ search }: { search: Partial<DealListQuery> }) {
@@ -201,16 +244,20 @@ export function DealsPage({ search }: { search: Partial<DealListQuery> }) {
 }
 
 export function DealPage({ dealId }: { dealId: string }) {
+  const auth = useAuth()
   const deal = useDealQuery(dealId)
   const updateDeal = useUpdateDealMutation(dealId)
   const changeStage = useChangeDealStageMutation(dealId)
   const addNote = useAddDealNoteMutation(dealId)
+  const createTask = useCreateTaskMutation(dealId)
 
-  const isSaving = updateDeal.isPending || changeStage.isPending || addNote.isPending
+  const isSaving =
+    updateDeal.isPending || changeStage.isPending || addNote.isPending || createTask.isPending
   const error =
     (updateDeal.isError ? updateDeal.error : null) ??
     (changeStage.isError ? changeStage.error : null) ??
-    (addNote.isError ? addNote.error : null)
+    (addNote.isError ? addNote.error : null) ??
+    (createTask.isError ? createTask.error : null)
 
   return (
     <CrmPage
@@ -231,6 +278,7 @@ export function DealPage({ dealId }: { dealId: string }) {
       )}
       {deal.data && (
         <DealDetail
+          currentUserId={auth.user?.id}
           deal={deal.data}
           error={error}
           isSaving={isSaving}
@@ -240,6 +288,9 @@ export function DealPage({ dealId }: { dealId: string }) {
           }}
           onChangeStage={(input) =>
             changeStage.mutate(input, { onSuccess: () => toast.success('Этап изменён') })
+          }
+          onCreateTask={(input) =>
+            createTask.mutate(input, { onSuccess: () => toast.success('Задача создана') })
           }
           onSaveNote={(note) =>
             updateDeal.mutate(
@@ -256,39 +307,381 @@ export function DealPage({ dealId }: { dealId: string }) {
   )
 }
 
-export function DashboardPage() {
+export function DashboardPage({ search }: { search: Partial<DashboardPeriod> }) {
+  const navigate = useNavigate()
+  const period = parseDashboardPeriod(search)
+  const dashboard = useDashboardQuery(period)
+
   return (
-    <CrmPlaceholderPage
+    <CrmPage
       description="Открытая воронка, предоплаты, успешные сделки и конверсии за период."
       title="Дашборд"
-    />
+    >
+      <DashboardPeriodControls
+        onChange={(next) =>
+          void navigate({ search: toDashboardPeriodSearch(next), to: '/app/dashboard' })
+        }
+        period={period}
+        range={dashboard.data?.range}
+      />
+
+      {dashboard.isPending && <ListLoading />}
+      {dashboard.isError && (
+        <RetryAlert
+          description={dashboard.error.message}
+          onRetry={() => void dashboard.refetch()}
+          title="Дашборд не загрузился"
+        />
+      )}
+      {dashboard.data && (
+        <>
+          <DashboardMetrics report={dashboard.data} />
+          <FunnelChart funnel={dashboard.data.funnel} />
+          <SourcePerformanceTable sources={dashboard.data.sources} />
+        </>
+      )}
+    </CrmPage>
   )
 }
 
-export function BoardPage() {
+/**
+ * The board (PRD 7.6).
+ *
+ * A drop opens a confirmation and only the confirmation commits, so a cancelled
+ * dialog needs no rollback: the card was never moved, because the columns are
+ * rendered from the server's response throughout.
+ */
+export function BoardPage({ search }: { search: Partial<DealBoardQuery> }) {
+  const navigate = useNavigate()
+  const query = parseDealBoardSearch(search)
+  const board = useDealBoardQuery(query)
+  const [move, setMove] = useState<{ deal: DealSummaryDto; stage: DealStage } | null>(null)
+  const changeStage = useChangeDealStageMutation(move?.deal.id ?? '')
+
+  const handleDrop = (deal: DealSummaryDto, intent: BoardDropIntent) => {
+    if (intent.kind === 'ignored') return
+    if (intent.kind === 'stage') {
+      // Nothing to confirm, so it goes straight to the server — which is still
+      // the only authority on whether the transition is allowed.
+      commit(deal, { stage: intent.stage })
+      return
+    }
+    setMove({ deal, stage: intent.kind === 'loss' ? 'LOST' : intent.stage })
+  }
+
+  const commit = (deal: DealSummaryDto, input: DealStageChangeInput) =>
+    changeStage.mutate(input, {
+      onSuccess: () => {
+        setMove(null)
+        toast.success(`${deal.client.name}: ${DEAL_STAGE_LABELS[input.stage]}`)
+      },
+      // A rejection — including the 400 a racing second drag gets from the
+      // per-deal lock — leaves the card in its column and says why.
+      onError: (error) => {
+        setMove(null)
+        toast.error(error.message)
+      },
+    })
+
   return (
-    <CrmPlaceholderPage
-      description="Колонки по активным этапам и перетаскивание карточек."
+    <CrmPage
+      description="Колонки по активным этапам. Перетащите карточку, чтобы изменить этап."
       title="Воронка"
-    />
+    >
+      {/*
+        The board deliberately carries one control rather than the list's filter
+        bar: that bar owns sorting and paging, which a board has neither of, so
+        reusing it would show the owner two controls that do nothing here. Every
+        other filter is still honoured from the URL, which is what makes the
+        dashboard's «критичных» counter deep-link into this view.
+      */}
+      <BoardFilterToggle
+        onChange={(next) => void navigate({ search: toDealBoardSearch(next), to: '/app/board' })}
+        query={query}
+      />
+
+      {board.isPending && <ListLoading />}
+      {board.isError && (
+        <RetryAlert
+          description={board.error.message}
+          onRetry={() => void board.refetch()}
+          title="Доска не загрузилась"
+        />
+      )}
+      {board.data && (
+        <DealBoard
+          board={board.data}
+          onDrop={handleDrop}
+          pendingMove={
+            changeStage.isPending && move ? { dealId: move.deal.id, stage: move.stage } : null
+          }
+        />
+      )}
+
+      {move && (
+        <StageCommitDialog
+          deal={move.deal}
+          isPending={changeStage.isPending}
+          onCancel={() => setMove(null)}
+          onConfirm={(input) => commit(move.deal, input)}
+          stage={move.stage}
+        />
+      )}
+    </CrmPage>
   )
 }
 
+/**
+ * The critical queue (PRD 7.4, PRD 10).
+ *
+ * Completing a task does not satisfy the next-step rule, so finishing the last
+ * active task on an open deal opens the scheduling dialog straight away rather
+ * than leaving the deal quietly critical.
+ */
 export function TasksPage() {
+  const auth = useAuth()
+  const critical = useCriticalTasksQuery()
+  const updateTask = useUpdateTaskMutation()
+  const [completed, setCompleted] = useState<CriticalTaskDto | null>(null)
+  const createTask = useCreateTaskMutation(completed?.deal.id ?? '')
+
+  /**
+   * The deal as it stands after the completion, which is what decides whether
+   * the owner still owes it a next step. `shouldPromptNextStep` reads that
+   * refetched task list rather than assuming — a deal that already had a second
+   * active task is not missing anything and must not be nagged.
+   */
+  const deal = useDealQuery(completed?.deal.id ?? '')
+  const needsNextStep = Boolean(
+    completed && deal.data && shouldPromptNextStep(deal.data, completed.task.id),
+  )
+
+  const complete = (item: CriticalTaskDto) =>
+    updateTask.mutate(
+      { input: { status: 'COMPLETED' }, taskId: item.task.id },
+      {
+        onSuccess: () => {
+          toast.success('Задача выполнена')
+          setCompleted(item)
+        },
+        onError: (error) => toast.error(error.message),
+      },
+    )
+
   return (
-    <CrmPlaceholderPage
-      description="Очередь задач: просроченные, на сегодня и сделки без следующего шага."
+    <CrmPage
+      description="Просроченные задачи по открытым сделкам. Сначала самые давние."
       title="Задачи"
-    />
+    >
+      {critical.isPending && <ListLoading />}
+      {critical.isError && (
+        <RetryAlert
+          description={critical.error.message}
+          onRetry={() => void critical.refetch()}
+          title="Очередь не загрузилась"
+        />
+      )}
+      {critical.data && <TaskQueue items={critical.data.items} onComplete={complete} />}
+
+      {needsNextStep && completed && (
+        <TaskDialog
+          currentUserId={auth.user?.id}
+          description={`${completed.deal.client.name}: задача выполнена, но сделка ещё открыта — у неё должен быть следующий шаг.`}
+          isPending={createTask.isPending}
+          onOpenChange={(next) => !next && setCompleted(null)}
+          onSubmit={(input) =>
+            createTask.mutate(input, {
+              onSuccess: () => {
+                setCompleted(null)
+                toast.success('Следующий шаг назначен')
+              },
+            })
+          }
+          open
+          submitError={createTask.isError ? createTask.error : null}
+          title="Следующий шаг"
+        />
+      )}
+    </CrmPage>
+  )
+}
+
+/**
+ * The board's one filter: «Только критичные» (PRD 7.6).
+ *
+ * Every other filter still arrives from the URL and is applied by the query —
+ * this control just makes the one the owner reaches for reachable without
+ * typing a query string.
+ */
+function BoardFilterToggle({
+  onChange,
+  query,
+}: {
+  onChange: (query: DealBoardQuery) => void
+  query: DealBoardQuery
+}) {
+  const active = activeDealFilters({
+    ...query,
+    page: 1,
+    pageSize: 20,
+    sort: 'submittedAt',
+    direction: 'desc',
+  })
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Toggle
+        aria-label="Показать только критичные сделки"
+        onPressedChange={(pressed) => onChange({ ...query, isCritical: pressed })}
+        pressed={query.isCritical}
+        variant="outline"
+      >
+        <Typography variant="control">Только критичные</Typography>
+      </Toggle>
+      {active
+        .filter((filter) => filter.key !== 'isCritical')
+        .map((filter) => (
+          <Badge key={filter.key} variant="secondary">
+            <Typography variant="controlXs">{`${filter.label}: ${filter.value}`}</Typography>
+          </Badge>
+        ))}
+    </div>
   )
 }
 
 export function NotificationsPage() {
+  const inbox = useNotificationInboxQuery({ page: 1, pageSize: 50, unreadOnly: false })
+  const markRead = useMarkNotificationsReadMutation()
+  const push = usePushSubscription()
+
+  // Opening this screen IS reading the inbox, so the batch goes out once here
+  // rather than one request per entry the owner happens to click.
+  const items = inbox.data?.items ?? []
+  const hasUnread = items.some((entry) => entry.readAt === null)
+
   return (
-    <CrmPlaceholderPage
+    <CrmPage
       description="Новые заявки, наступившие и просроченные задачи."
       title="Уведомления"
-    />
+    >
+      <PushPermissionCard
+        error={push.error}
+        isPending={push.isPending}
+        onEnable={push.enable}
+        permission={push.permission}
+      />
+
+      {hasUnread && (
+        <div>
+          <Button
+            disabled={markRead.isPending}
+            onClick={() => markRead.mutate(items)}
+            type="button"
+            variant="outline"
+          >
+            <Typography variant="control">Отметить прочитанными</Typography>
+          </Button>
+        </div>
+      )}
+
+      <NotificationInbox
+        error={inbox.isError ? inbox.error : null}
+        isError={inbox.isError}
+        isPending={inbox.isPending}
+        notifications={items}
+        onRetry={() => void inbox.refetch()}
+        unreadCount={inbox.data?.unreadCount ?? 0}
+      />
+    </CrmPage>
+  )
+}
+
+/** Today / week / month / custom (PRD 7.8). */
+function DashboardPeriodControls({
+  onChange,
+  period,
+  range,
+}: {
+  onChange: (period: DashboardPeriod) => void
+  period: DashboardPeriod
+  range?: DashboardDto['range']
+}) {
+  return (
+    <div className="grid gap-3">
+      <div className="flex flex-wrap gap-2">
+        {dashboardPeriodKindSchema.options.map((option) => (
+          <Button
+            key={option}
+            onClick={() =>
+              onChange(
+                option === 'custom'
+                  ? {
+                      period: 'custom',
+                      from: range?.from ?? todayInKyiv(),
+                      to: range?.to ?? todayInKyiv(),
+                    }
+                  : { period: option },
+              )
+            }
+            size="sm"
+            type="button"
+            variant={period.period === option ? 'default' : 'outline'}
+          >
+            <Typography variant="control">{DASHBOARD_PERIOD_LABELS[option]}</Typography>
+          </Button>
+        ))}
+      </div>
+
+      {period.period === 'custom' && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CrmTextField
+            label="Начало периода"
+            onChange={(value) => onChange({ ...period, from: value })}
+            type="date"
+            value={period.from ?? ''}
+          />
+          <CrmTextField
+            label="Конец периода"
+            onChange={(value) => onChange({ ...period, to: value })}
+            type="date"
+            value={period.to ?? ''}
+          />
+        </div>
+      )}
+
+      {range && (
+        <Typography tone="muted" variant="caption">
+          {`Период: ${range.from} — ${range.to}`}
+        </Typography>
+      )}
+    </div>
+  )
+}
+
+/** The Kyiv calendar date, so a custom range starts on the owner's today. */
+function todayInKyiv() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv' }).format(new Date())
+}
+
+function RetryAlert({
+  description,
+  onRetry,
+  title,
+}: {
+  description: string
+  onRetry: () => void
+  title: string
+}) {
+  return (
+    <Alert variant="destructive">
+      <AlertTitle>{title}</AlertTitle>
+      <AlertDescription>{description}</AlertDescription>
+      <AlertAction>
+        <Button onClick={onRetry} size="sm" type="button" variant="outline">
+          <Typography variant="control">Повторить</Typography>
+        </Button>
+      </AlertAction>
+    </Alert>
   )
 }
 
@@ -319,31 +712,51 @@ function CrmPage({
   )
 }
 
+/**
+ * The header every CRM screen shares.
+ *
+ * The inbox lives here rather than only on `/app/notifications` so a new lead
+ * is visible from wherever the owner happens to be working, which is the whole
+ * point of an inbox that stays the source of truth when push is denied.
+ */
 function HeaderActions({ children }: { children?: ReactNode }) {
   return (
     <div className="flex flex-wrap gap-2">
       <CommandSearch />
+      <HeaderNotifications />
       {children}
     </div>
   )
 }
 
-function CrmPlaceholderPage({
-  description,
-  title,
-}: {
-  description: string
-  title: string
-}) {
+function HeaderNotifications() {
+  const [isOpen, setIsOpen] = useState(false)
+  const inbox = useNotificationInboxQuery({ page: 1, pageSize: 20, unreadOnly: false })
+  const markRead = useMarkNotificationsReadMutation()
+  const items = inbox.data?.items ?? []
+
   return (
-    <CrmPage description={description} title={title}>
-      <Empty>
-        <EmptyHeader>
-          <EmptyTitle>Раздел готовится</EmptyTitle>
-          <EmptyDescription>{description}</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    </CrmPage>
+    <NotificationBell
+      onOpenChange={(open) => {
+        setIsOpen(open)
+        // Opening the inbox IS reading it, and the whole page is marked in one
+        // batched request rather than one per entry — that endpoint shares a
+        // rate bucket with every CRM write.
+        if (open && items.length > 0) markRead.mutate(items)
+      }}
+      open={isOpen}
+      unreadCount={inbox.data?.unreadCount ?? 0}
+    >
+      <NotificationInbox
+        error={inbox.isError ? inbox.error : null}
+        isError={inbox.isError}
+        isPending={inbox.isPending}
+        notifications={items}
+        onOpen={() => setIsOpen(false)}
+        onRetry={() => void inbox.refetch()}
+        unreadCount={inbox.data?.unreadCount ?? 0}
+      />
+    </NotificationBell>
   )
 }
 

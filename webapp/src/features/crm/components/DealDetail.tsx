@@ -3,6 +3,7 @@ import {
   type DealDetailDto,
   type DealStageChangeInput,
   type DealUpdateInput,
+  type TaskCreateInput,
 } from '@teraso-crm/contracts'
 import { useState, type ReactNode } from 'react'
 
@@ -40,6 +41,7 @@ import { CriticalBadge } from './CriticalBadge'
 import { LeadClassBadge, NextStepBadge, StageBadge } from './DealBadges'
 import { DealEditDialog } from './DealEditDialog'
 import { DealStageDialog } from './DealStageDialog'
+import { TaskDialog } from './TaskDialog'
 
 /**
  * The deal card (PRD 7.1).
@@ -53,23 +55,29 @@ import { DealStageDialog } from './DealStageDialog'
  * note stay above the fold and reachable one-handed (PRD 10).
  */
 export function DealDetail({
+  currentUserId,
   deal,
   error = null,
   isSaving,
   onAddNote,
   onChangeStage,
+  onCreateTask,
   onSaveNote,
   onUpdateDeal,
 }: {
+  currentUserId?: string
   deal: DealDetailDto
   error?: Error | null
   isSaving: boolean
   onAddNote: (text: string) => Promise<unknown>
   onChangeStage: (input: DealStageChangeInput) => void
+  /** Absent leaves the card read-only for tasks, which is how tests render it. */
+  onCreateTask?: (input: TaskCreateInput) => void
   onSaveNote: (note: string | null) => void
   onUpdateDeal: (input: DealUpdateInput) => void
 }) {
   const landingHref = safeExternalHref(deal.landingUrl)
+  const [isSchedulingTask, setIsSchedulingTask] = useState(false)
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
@@ -127,8 +135,27 @@ export function DealDetail({
                   key={`edit-${deal.updatedAt}`}
                   onSubmit={onUpdateDeal}
                 />
+                {onCreateTask && (
+                  <Button onClick={() => setIsSchedulingTask(true)} size="sm" type="button" variant="outline">
+                    <Typography variant="control">Новая задача</Typography>
+                  </Button>
+                )}
                 <AttributionDrawer deal={deal} />
               </div>
+
+              {onCreateTask && (
+                <TaskDialog
+                  currentUserId={currentUserId}
+                  isPending={isSaving}
+                  key={`task-${deal.updatedAt}`}
+                  onOpenChange={setIsSchedulingTask}
+                  onSubmit={(input) => {
+                    setIsSchedulingTask(false)
+                    onCreateTask(input)
+                  }}
+                  open={isSchedulingTask}
+                />
+              )}
 
               {deal.stage === 'LOST' && deal.lossReason && (
                 <Alert>

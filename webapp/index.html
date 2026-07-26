@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Installable shell (PRD 7.7, PRD 10). The manifest and the service worker
+      are served verbatim from webapp/public, so they are identical in dev and
+      in production. The theme colour is declared for both schemes because the
+      app follows the system theme.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#18181b" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Teraso CRM" />
     <title>Teraso CRM</title>
   </head>
   <body>

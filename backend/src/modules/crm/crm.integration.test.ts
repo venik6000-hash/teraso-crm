@@ -5,6 +5,7 @@ import {
   clientDetailResponseSchema,
   clientLookupResponseSchema,
   criticalTasksResponseSchema,
+  dashboardResponseSchema,
   dealActivityResponseSchema,
   dealBoardResponseSchema,
   dealDetailResponseSchema,
@@ -1590,6 +1591,231 @@ maybeDescribe('CRM clients, deals and history integration', () => {
   })
 
   /* ---------------------------------------------------------------- *
+   * Dashboard (PRD 7.8)
+   *
+   * Every figure below is aggregated in PostgreSQL. The fixtures are laid out
+   * so each measure can only come out right for the right reason: the open
+   * pipeline has exactly one contributor, received prepayments and full
+   * payments land on deliberately different dates, and one deal carries a
+   * prepayment OUTSIDE the window while its full payment falls inside it.
+   * ---------------------------------------------------------------- */
+
+  describe('dashboard', () => {
+    /** Days back from now, as an instant inside the trailing month window. */
+    const daysAgo = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+
+    /**
+     * Four deals covering every attribution rule the report has to get right.
+     *
+     * `open` is the ONLY deal carrying a potential amount, so a pipeline total
+     * that accidentally counted closed deals or defaulted a null to zero would
+     * not produce 65000.00. `won` moved through PREPAYMENT with its prepayment
+     * dated outside the window, which is what separates "money received this
+     * period" from "deal that happens to sit in a paid stage".
+     */
+    async function seedDashboardFixtures() {
+      const open = await createDeal({
+        name: 'Открытая воронка',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+        potentialAmount: '65000',
+      })
+      await changeStage(open.id, { stage: 'QUALIFIED' })
+      await changeStage(open.id, { stage: 'PROPOSAL_SENT' })
+
+      const prepaid = await createDeal({
+        name: 'Предоплата получена',
+        phone: '+380671110002',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(prepaid.id, { stage: 'QUALIFIED' })
+      await changeStage(prepaid.id, { stage: 'PROPOSAL_SENT' })
+      await changeStage(prepaid.id, {
+        stage: 'PREPAYMENT',
+        prepaymentAmount: '20000',
+        prepaymentPaidAt: daysAgo(3),
+      })
+
+      const won = await createDeal({
+        name: 'Полностью оплачена',
+        phone: '+380671110003',
+        source: 'Instagram',
+      })
+      await changeStage(won.id, { stage: 'QUALIFIED' })
+      await changeStage(won.id, { stage: 'PROPOSAL_SENT' })
+      // Prepaid long before the window: its prepayment must NOT be reported as
+      // received this period even though the full payment inside it is.
+      await changeStage(won.id, {
+        stage: 'PREPAYMENT',
+        prepaymentAmount: '50000',
+        prepaymentPaidAt: daysAgo(120),
+      })
+      await changeStage(won.id, {
+        stage: 'WON',
+        fullPaymentAmount: '80000',
+        fullPaymentPaidAt: daysAgo(2),
+      })
+
+      const stale = await createDeal({
+        name: 'Успех прошлого квартала',
+        phone: '+380671110004',
+        source: 'Instagram',
+      })
+      await changeStage(stale.id, { stage: 'QUALIFIED' })
+      await changeStage(stale.id, { stage: 'PROPOSAL_SENT' })
+      await changeStage(stale.id, {
+        stage: 'PREPAYMENT',
+        prepaymentAmount: '30000',
+        prepaymentPaidAt: daysAgo(150),
+      })
+      await changeStage(stale.id, {
+        stage: 'WON',
+        fullPaymentAmount: '900000',
+        fullPaymentPaidAt: daysAgo(140),
+      })
+
+      return { open, prepaid, stale, won }
+    }
+
+    test('separates open pipeline, received prepayments and full payments by their own dates', async () => {
+      await seedDashboardFixtures()
+
+      const report = await getDashboard('period=month')
+
+      expect(report).toMatchObject({
+        openPipelineAmount: '65000.00',
+        prepaymentReceivedAmount: '20000.00',
+        wonPaymentAmount: '80000.00',
+      })
+      // A deal in PREPAYMENT is commercially confirmed but NOT won (PRD 12), and
+      // the win is counted from the full payment inside the window rather than
+      // from the stage, so the deal paid off 140 days ago stays out.
+      expect(report.wonDealCount).toBe(1)
+      expect(report.newLeadCount).toBe(4)
+      expect(report.range).toMatchObject({ period: 'month' })
+    })
+
+    test('reports operational counters as a snapshot of now', async () => {
+      await seedDashboardFixtures()
+
+      const report = await getDashboard('period=month')
+
+      // The two open deals carry no task at all; the two won ones are exempt
+      // from the next-step rule entirely (PRD 7.4).
+      expect(report.noNextStepDealCount).toBe(2)
+      // Nothing has spent its 30-minute grace window yet, so nothing is critical.
+      expect(report.criticalDealCount).toBe(0)
+      expect(report.overdueTaskCount).toBe(0)
+      expect(report.tasksDueTodayCount).toBe(0)
+    })
+
+    test('counts an overdue task and a critical deal once the grace window has passed', async () => {
+      const deal = await createDeal({
+        name: 'Просрочена',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Просроченный звонок',
+        dueAt: new Date(Date.now() - 60_000).toISOString(),
+      })
+
+      const report = await getDashboard('period=month')
+
+      expect(report.overdueTaskCount).toBe(1)
+      // An overdue task makes the deal critical immediately, with no grace.
+      expect(report.criticalDealCount).toBe(1)
+      expect(report.noNextStepDealCount).toBe(1)
+    })
+
+    test('builds the funnel from stage transitions inside the period, not the current stage', async () => {
+      await seedDashboardFixtures()
+
+      const report = await getDashboard('period=month')
+
+      expect(report.funnel).toEqual([
+        { fromStage: 'NEW', toStage: 'QUALIFIED', count: 4, share: 1 },
+        { fromStage: 'QUALIFIED', toStage: 'PROPOSAL_SENT', count: 4, share: 1 },
+        { fromStage: 'PROPOSAL_SENT', toStage: 'PREPAYMENT', count: 3, share: 0.75 },
+        { fromStage: 'PREPAYMENT', toStage: 'WON', count: 2, share: 0.5 },
+      ])
+    })
+
+    test('leaves the funnel untouched when a closed deal is reopened', async () => {
+      const { stale } = await seedDashboardFixtures()
+      const before = await getDashboard('period=month')
+
+      // WON -> NEW writes a REOPENED activity with no stage pair, so an
+      // administrative correction must not register as a conversion.
+      await changeStage(stale.id, { stage: 'NEW', lossReason: null })
+
+      const after = await getDashboard('period=month')
+      expect(after.funnel).toEqual(before.funnel)
+    })
+
+    test('excludes transitions that fall outside a custom period', async () => {
+      await seedDashboardFixtures()
+
+      // A window that closed before any of the fixtures moved.
+      const report = await getDashboard('period=custom&from=2020-01-01&to=2020-01-31')
+
+      expect(report.funnel.every((step) => step.count === 0)).toBe(true)
+      expect(report.wonPaymentAmount).toBe('0.00')
+      expect(report.prepaymentReceivedAmount).toBe('0.00')
+      expect(report.newLeadCount).toBe(0)
+      // Open pipeline is a snapshot of money still in play, so it ignores the window.
+      expect(report.openPipelineAmount).toBe('65000.00')
+      expect(report.range).toMatchObject({
+        period: 'custom',
+        from: '2020-01-01',
+        to: '2020-01-31',
+      })
+    })
+
+    test('breaks results down by source, keeping snapshot and period measures apart', async () => {
+      await seedDashboardFixtures()
+
+      const report = await getDashboard('period=month')
+      const bySource = Object.fromEntries(report.sources.map((row) => [row.source, row]))
+
+      expect(bySource['teraso.com.ua']).toMatchObject({
+        utmSource: null,
+        leadCount: 2,
+        openPipelineAmount: '65000.00',
+        wonCount: 0,
+        wonAmount: '0.00',
+      })
+      expect(bySource.Instagram).toMatchObject({
+        leadCount: 2,
+        openPipelineAmount: '0.00',
+        wonCount: 1,
+        wonAmount: '80000.00',
+      })
+    })
+
+    test('rejects a custom period without dates and a plain period carrying them', async () => {
+      await expectValidationMessage(
+        await dashboardRequest('period=custom'),
+        'Укажите начало и конец периода',
+      )
+      await expectValidationMessage(
+        await dashboardRequest('period=month&from=2026-07-01&to=2026-07-23'),
+        'Даты задаются только для произвольного периода',
+      )
+      await expectValidationMessage(
+        await dashboardRequest('period=custom&from=2026-07-23&to=2026-07-01'),
+        'Начало периода позже его конца',
+      )
+    })
+
+    test('refuses an unauthenticated request', async () => {
+      const response = await app.request('/api/crm/dashboard?period=month')
+      expect(response.status).toBe(401)
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
    * Critical tasks (PRD 7.9 — the mobile critical-task view)
    * ---------------------------------------------------------------- */
 
@@ -1869,6 +2095,16 @@ maybeDescribe('CRM clients, deals and history integration', () => {
     const column = board.columns.find((entry) => entry.stage === stage)
     if (!column) throw new Error(`board is missing the ${stage} column`)
     return column
+  }
+
+  function dashboardRequest(query: string) {
+    return app.request(`/api/crm/dashboard?${query}`, { headers: jsonHeaders(ownerToken) })
+  }
+
+  async function getDashboard(query: string) {
+    const response = await dashboardRequest(query)
+    expect(response.status).toBe(200)
+    return dashboardResponseSchema.parse(await response.json()).report
   }
 
   async function criticalTasks() {

@@ -62,6 +62,46 @@ export const nearestActiveTaskLateral = Prisma.sql`
   ) nearest_task ON TRUE
 `
 
+/* ------------------------------------------------------------------ *
+ * Urgency predicates
+ *
+ * These restate `evaluateDealCriticality` in SQL, because filtering, counting
+ * and paging all have to happen in the database. There is exactly ONE SQL copy
+ * of each rule and it lives here: the list, the board and the dashboard's
+ * operational counters all call these, so the bidirectional drift guard in the
+ * integration test covers every surface rather than only the one it was written
+ * against.
+ *
+ * They read two aliases from the surrounding query — `d` for the deal row and
+ * `nearest_task` for `nearestActiveTaskLateral` — so any caller must join that
+ * lateral. `dealUrgencyFrom` below is the canonical FROM clause that does.
+ * ------------------------------------------------------------------ */
+
+/** Stages still expected to carry a next step; WON and LOST are exempt. */
+export const isOpenDealSql = Prisma.sql`d.stage IN ${openStagesSql}`
+
+/** The nearest active task exists and its time has arrived. */
+export function overdueTaskSql(now: Date): Prisma.Sql {
+  return Prisma.sql`nearest_task.due_at IS NOT NULL AND nearest_task.due_at <= ${now}`
+}
+
+/** No active task remains in the future. */
+export function noNextStepSql(now: Date): Prisma.Sql {
+  return Prisma.sql`(nearest_task.due_at IS NULL OR nearest_task.due_at <= ${now})`
+}
+
+/**
+ * Open, and either already late or past its next-step grace window. The cutoff
+ * comes from `nextStepGraceCutoff` so this predicate and the domain function
+ * read the window from the same contract constant.
+ */
+export function criticalDealSql(now: Date): Prisma.Sql {
+  return Prisma.sql`(${isOpenDealSql} AND ((${overdueTaskSql(now)}) OR (${noNextStepSql(now)} AND d.created_at <= ${nextStepGraceCutoff(now)})))`
+}
+
+/** Deals joined to their nearest active task — the shape the predicates expect. */
+export const dealUrgencyFrom = Prisma.sql`FROM deals d ${nearestActiveTaskLateral}`
+
 /**
  * Accepts the shared filter base (`DealBoardQuery`); the list passes its wider
  * query, whose extra paging and sort keys this function never reads, so board
@@ -100,23 +140,13 @@ export function listConditions(query: DealBoardQuery, now: Date): Prisma.Sql[] {
     conditions.push(Prisma.sql`d.potential_amount <= ${query.amountMax}::numeric`)
   }
 
-  /**
-   * The quick flags below restate `evaluateDealCriticality` in SQL, because
-   * filtering and paging have to happen in the database. Both sides read the
-   * open-stage set and the grace window from the same contract constants, and
-   * the integration test asserts they agree in both directions.
-   */
-  const isOpen = Prisma.sql`d.stage IN ${openStagesSql}`
-  const overdue = Prisma.sql`nearest_task.due_at IS NOT NULL AND nearest_task.due_at <= ${now}`
-  const noNextStep = Prisma.sql`(nearest_task.due_at IS NULL OR nearest_task.due_at <= ${now})`
-
-  if (query.noNextStep) conditions.push(Prisma.sql`(${isOpen} AND ${noNextStep})`)
-  if (query.overdue) conditions.push(Prisma.sql`(${isOpen} AND ${overdue})`)
-  if (query.isCritical) {
-    conditions.push(
-      Prisma.sql`(${isOpen} AND ((${overdue}) OR (${noNextStep} AND d.created_at <= ${nextStepGraceCutoff(now)})))`,
-    )
+  // The quick flags select on the shared urgency predicates above, so the list,
+  // the board and the dashboard counters cannot drift apart.
+  if (query.noNextStep) {
+    conditions.push(Prisma.sql`(${isOpenDealSql} AND ${noNextStepSql(now)})`)
   }
+  if (query.overdue) conditions.push(Prisma.sql`(${isOpenDealSql} AND ${overdueTaskSql(now)})`)
+  if (query.isCritical) conditions.push(criticalDealSql(now))
   if (query.dueToday) {
     /**
      * "Сегодня" is an operational work filter, so it is gated by `isOpen` like
@@ -128,7 +158,7 @@ export function listConditions(query: DealBoardQuery, now: Date): Prisma.Sql[] {
      */
     const today = kyivTodayRange(now)
     conditions.push(
-      Prisma.sql`(${isOpen} AND EXISTS (
+      Prisma.sql`(${isOpenDealSql} AND EXISTS (
         SELECT 1 FROM deal_tasks t
         WHERE t.deal_id = d.id
           AND t.status = 'ACTIVE'::task_status

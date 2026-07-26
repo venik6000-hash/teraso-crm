@@ -43,8 +43,19 @@ test('each workspace lists its own sections and the other one it may open', () =
     { label: 'Settings', to: '/admin/settings' },
     { label: 'CRM', to: '/app/deals' },
   ])
+})
+
+/**
+ * Every role lands in the CRM, the administrator included.
+ *
+ * The owner IS the administrator of the only account a Teraso deployment has,
+ * and the product they sign in to use is the CRM — leads, the board and today's
+ * critical tasks — not user management. `/admin` stays one click away in the
+ * sidebar for the rare account change.
+ */
+test('signing in lands every role in the CRM rather than the account console', () => {
   expect(homePathForRole('user')).toBe('/app')
-  expect(homePathForRole('admin')).toBe('/admin')
+  expect(homePathForRole('admin')).toBe('/app')
 })
 
 test('destinations outside an account reach resolve to its home', () => {

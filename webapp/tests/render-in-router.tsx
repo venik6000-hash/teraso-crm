@@ -20,7 +20,14 @@ import { renderToStaticMarkup } from 'react-dom/server'
 export async function renderInRouter(node: ReactNode, initialPath = '/app/deals') {
   const rootRoute = createRootRoute({ component: () => node })
   const routeTree = rootRoute.addChildren(
-    ['/app/deals', dealPath('$dealId'), '/app/board', '/app/tasks', '/app/notifications'].map(
+    [
+      '/app/deals',
+      dealPath('$dealId'),
+      '/app/board',
+      '/app/tasks',
+      '/app/notifications',
+      '/app/dashboard',
+    ].map(
       (path) =>
         createRoute({
           getParentRoute: () => rootRoute,

@@ -1,11 +1,8 @@
 import {
-  dealStageChangeSchema,
   dealStageSchema,
-  lossReasonSchema,
   type DealDetailDto,
   type DealStage,
   type DealStageChangeInput,
-  type LossReason,
 } from '@teraso-crm/contracts'
 import { useState } from 'react'
 
@@ -33,14 +30,15 @@ import {
 } from '@/components/ui/dialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Typography } from '@/components/typography'
+import { DEAL_STAGE_LABELS } from '../model'
+import { emptyFormErrors } from '../validation'
+import { CrmSelectField } from './CrmField'
 import {
-  DEAL_STAGE_LABELS,
-  LOSS_REASON_LABELS,
-  toInstantFromKyivInput,
-  toKyivDateTimeInput,
-} from '../model'
-import { emptyFormErrors, toFormErrors } from '../validation'
-import { CrmSelectField, CrmTextField, CrmTextareaField } from './CrmField'
+  StageCommitFields,
+  buildStageChangeInput,
+  emptyStageCommitDraft,
+  type StageCommitDraft,
+} from './StageCommitFields'
 
 /**
  * Moves a deal through the funnel from the card (PRD 7.3).
@@ -110,16 +108,10 @@ function StageChangeDialog({
 }) {
   const [isOpen, setIsOpen] = useState(false)
   const [stage, setStage] = useState<DealStage | null>(null)
-  const [lossReason, setLossReason] = useState<LossReason | null>(null)
-  const [comment, setComment] = useState('')
-  const [amount, setAmount] = useState('')
-  const [paidAt, setPaidAt] = useState(toKyivDateTimeInput(new Date().toISOString()))
+  const [draft, setDraft] = useState<StageCommitDraft>(() => emptyStageCommitDraft())
   const [errors, setErrors] = useState(emptyFormErrors)
 
   const options = dealStageSchema.options.filter((option) => option !== deal.stage)
-  const needsPrepayment = stage === 'PREPAYMENT'
-  const needsFullPayment = stage === 'WON'
-  const needsLossReason = stage === 'LOST'
 
   const submit = () => {
     if (!stage) {
@@ -127,21 +119,11 @@ function StageChangeDialog({
       return
     }
 
-    const payload: Record<string, unknown> = { stage }
-    if (comment.trim()) payload.comment = comment.trim()
-    if (needsLossReason) payload.lossReason = lossReason ?? undefined
-    if (needsPrepayment) {
-      payload.prepaymentAmount = amount.trim()
-      payload.prepaymentPaidAt = toInstantFromKyivInput(paidAt)
-    }
-    if (needsFullPayment) {
-      payload.fullPaymentAmount = amount.trim()
-      payload.fullPaymentPaidAt = toInstantFromKyivInput(paidAt)
-    }
-
-    const parsed = dealStageChangeSchema.safeParse(payload)
-    if (!parsed.success) {
-      setErrors(toFormErrors(parsed.error.issues))
+    // The payment and loss-reason fields are assembled by the same builder the
+    // board's drop confirmation uses, so the two surfaces cannot drift.
+    const built = buildStageChangeInput(stage, draft)
+    if (!built.ok) {
+      setErrors(built.errors)
       return
     }
 
@@ -150,7 +132,7 @@ function StageChangeDialog({
     // about the deal, so it belongs on the card next to the stage it names,
     // not hidden inside a dialog the owner has to reopen to read.
     setIsOpen(false)
-    onChangeStage(parsed.data)
+    onChangeStage(built.value)
   }
 
   return (
@@ -176,64 +158,31 @@ function StageChangeDialog({
         )}
 
         <div className="grid gap-4">
-          <CrmSelectField
-            error={errors.fields.stage}
-            label="Новый этап"
-            onChange={(value) => {
-              setStage(dealStageSchema.parse(value))
-              setErrors(emptyFormErrors)
-            }}
-            options={options.map((option) => ({
-              label: DEAL_STAGE_LABELS[option],
-              value: option,
-            }))}
-            placeholder="Выберите этап"
-            value={stage ?? undefined}
-          />
-
-          {needsLossReason && (
+          <div data-testid="deal-stage-select">
             <CrmSelectField
-              error={errors.fields.lossReason}
-              label="Причина потери"
-              onChange={(value) => setLossReason(lossReasonSchema.parse(value))}
-              options={lossReasonSchema.options.map((option) => ({
-                label: LOSS_REASON_LABELS[option],
+              error={errors.fields.stage}
+              label="Новый этап"
+              onChange={(value) => {
+                setStage(dealStageSchema.parse(value))
+                setErrors(emptyFormErrors)
+              }}
+              options={options.map((option) => ({
+                label: DEAL_STAGE_LABELS[option],
                 value: option,
               }))}
-              placeholder="Выберите причину"
-              value={lossReason ?? undefined}
+              placeholder="Выберите этап"
+              value={stage ?? undefined}
+            />
+          </div>
+
+          {stage && (
+            <StageCommitFields
+              draft={draft}
+              errors={errors}
+              onChange={setDraft}
+              stage={stage}
             />
           )}
-
-          {(needsPrepayment || needsFullPayment) && (
-            <div className="grid gap-4 sm:grid-cols-2">
-              <CrmTextField
-                error={errors.fields.prepaymentAmount ?? errors.fields.fullPaymentAmount}
-                inputMode="decimal"
-                label={needsPrepayment ? 'Сумма предоплаты' : 'Сумма полной оплаты'}
-                onChange={setAmount}
-                placeholder="65000.00"
-                value={amount}
-              />
-              <CrmTextField
-                description="Время по Киеву"
-                error={errors.fields.prepaymentPaidAt ?? errors.fields.fullPaymentPaidAt}
-                label="Дата оплаты"
-                onChange={setPaidAt}
-                type="datetime-local"
-                value={paidAt}
-              />
-            </div>
-          )}
-
-          <CrmTextareaField
-            error={errors.fields.comment}
-            label="Комментарий в ленту"
-            maxLength={4000}
-            onChange={setComment}
-            rows={2}
-            value={comment}
-          />
         </div>
 
         <DialogFooter>
@@ -242,7 +191,20 @@ function StageChangeDialog({
               <Typography variant="control">Отмена</Typography>
             </Button>
           </DialogClose>
-          <Button disabled={isSaving} onClick={submit} type="button">
+          {/*
+            The test id names the ACTION rather than the control, so the same
+            confirm button is addressable as «отметить предоплату» here and on
+            the board's drop dialog — one selector per business step instead of
+            one per surface.
+          */}
+          <Button
+            data-testid={
+              stage === 'PREPAYMENT' ? 'mark-prepayment' : stage === 'WON' ? 'mark-won' : undefined
+            }
+            disabled={isSaving}
+            onClick={submit}
+            type="button"
+          >
             <Typography variant="control">Сохранить этап</Typography>
           </Button>
         </DialogFooter>

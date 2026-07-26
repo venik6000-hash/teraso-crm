@@ -7,6 +7,8 @@ import type {
   DealStageChangeInput,
   DealUpdateInput,
   NoteCreateInput,
+  TaskCreateInput,
+  TaskUpdateInput,
 } from '@teraso-crm/contracts'
 
 import { useAuth } from '@/features/auth'
@@ -14,10 +16,15 @@ import {
   addDealNote,
   changeDealStage,
   createDeal,
+  createDealTask,
+  getBoard,
+  getDashboard,
   getDeal,
+  listCriticalTasks,
   listDeals,
   lookupClient,
   updateDeal,
+  updateDealTask,
 } from './api'
 import { MIN_DEAL_SEARCH_LENGTH } from './model'
 
@@ -34,6 +41,7 @@ export const crmQueryKeys = {
   board: (filters: DealBoardQuery) => ['crm', 'board', filters] as const,
   dashboard: (period: DashboardPeriod) => ['crm', 'dashboard', period] as const,
   clientLookup: (phone: string) => ['crm', 'client-lookup', phone] as const,
+  criticalTasks: () => ['crm', 'critical-tasks'] as const,
 }
 
 /**
@@ -59,6 +67,7 @@ export const crmInvalidatedRoots = [
   ['crm', 'board'],
   ['crm', 'dashboard'],
   ['crm', 'client-lookup'],
+  ['crm', 'critical-tasks'],
   ['notifications'],
 ] as const satisfies ReadonlyArray<ReadonlyArray<string>>
 
@@ -94,6 +103,49 @@ export function useDealQuery(dealId: string) {
   return useQuery({
     queryKey: crmQueryKeys.deal(dealId),
     queryFn: () => getDeal(auth.transport, dealId),
+  })
+}
+
+export function useDealBoardQuery(filters: DealBoardQuery) {
+  const auth = useAuth()
+  return useQuery({
+    queryKey: crmQueryKeys.board(filters),
+    queryFn: () => getBoard(auth.transport, filters),
+  })
+}
+
+export function useDashboardQuery(period: DashboardPeriod) {
+  const auth = useAuth()
+  return useQuery({
+    queryKey: crmQueryKeys.dashboard(period),
+    queryFn: () => getDashboard(auth.transport, period),
+  })
+}
+
+export function useCriticalTasksQuery() {
+  const auth = useAuth()
+  return useQuery({
+    queryKey: crmQueryKeys.criticalTasks(),
+    queryFn: () => listCriticalTasks(auth.transport),
+  })
+}
+
+export function useCreateTaskMutation(dealId: string) {
+  const auth = useAuth()
+  const invalidate = useInvalidateCrm()
+  return useMutation({
+    mutationFn: (input: TaskCreateInput) => createDealTask(auth.transport, dealId, input),
+    onSuccess: invalidate,
+  })
+}
+
+export function useUpdateTaskMutation() {
+  const auth = useAuth()
+  const invalidate = useInvalidateCrm()
+  return useMutation({
+    mutationFn: ({ input, taskId }: { input: TaskUpdateInput; taskId: string }) =>
+      updateDealTask(auth.transport, taskId, input),
+    onSuccess: invalidate,
   })
 }
 

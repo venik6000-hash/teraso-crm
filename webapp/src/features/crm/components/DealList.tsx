@@ -48,6 +48,7 @@ export function DealList({ deals }: { deals: ReadonlyArray<DealSummaryDto> }) {
         {deals.map((deal) => (
           <TableRow
             className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-xl border-0 p-4 ring-1 ring-border sm:table-row sm:rounded-none sm:border-b sm:p-0 sm:ring-0"
+            data-testid={`deal-row-${deal.id}`}
             key={deal.id}
           >
             <TableCell className="col-span-2 min-w-0 p-0 align-top whitespace-normal sm:p-3">

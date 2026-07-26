@@ -59,15 +59,28 @@ export function kyivDayEndExclusive(isoDate: string): Date {
   return kyivDayStart(nextDate.toISOString().slice(0, 10))
 }
 
-/** The Kyiv calendar day containing `now`, as a half-open UTC range. */
-export function kyivTodayRange(now: Date): { start: Date; end: Date } {
-  const today = kyivParts
-    .formatToParts(now)
+/**
+ * The Kyiv calendar date containing an instant, as `YYYY-MM-DD`.
+ *
+ * This is the inverse of `kyivDayStart` and the only correct way to ask "which
+ * day is it in Kyiv": reading `toISOString().slice(0, 10)` off an instant
+ * answers with the UTC day, which is already the next date in Kyiv every
+ * evening after 21:00 in summer.
+ */
+export function kyivDateOf(instant: Date): string {
+  const parts = kyivParts
+    .formatToParts(instant)
     .reduce<Record<string, string>>((accumulator, part) => {
       accumulator[part.type] = part.value
       return accumulator
     }, {})
-  const isoDate = `${today.year}-${today.month}-${today.day}`
+
+  return `${parts.year}-${parts.month}-${parts.day}`
+}
+
+/** The Kyiv calendar day containing `now`, as a half-open UTC range. */
+export function kyivTodayRange(now: Date): { start: Date; end: Date } {
+  const isoDate = kyivDateOf(now)
 
   return { start: kyivDayStart(isoDate), end: kyivDayEndExclusive(isoDate) }
 }

@@ -7,4 +7,11 @@ export {
   TasksPage as CrmTasksPage,
 } from './pages'
 export { crmInvalidatedRoots, crmQueryKeys } from './queries'
-export { DEAL_DETAIL_ROUTE_PATH, cleanDealListSearch } from './model'
+export {
+  DEAL_DETAIL_ROUTE_PATH,
+  cleanDashboardPeriodSearch,
+  cleanDealBoardSearch,
+  cleanDealListSearch,
+  formatDateTime,
+  formatMoney,
+} from './model'

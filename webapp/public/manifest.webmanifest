@@ -1,0 +1,27 @@
+{
+  "name": "Teraso CRM",
+  "short_name": "Teraso CRM",
+  "description": "CRM для входящих заявок Teraso: воронка, задачи и уведомления.",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "/app/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#18181b",
+  "background_color": "#fafafa",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

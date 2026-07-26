@@ -23,6 +23,20 @@ export const defaultDatabaseUrl = `postgresql://superuser:superpassword@localhos
 export const e2eAdminEmail = 'admin@example.com'
 export const e2eAdminPassword = 'admin-e2e-password'
 
+/**
+ * The Teraso site webhook secret for the test backend.
+ *
+ * The CRM journey drives `POST /api/crm/inbound/quiz` exactly as the real site
+ * does — HMAC-signed — because the whole point of that test is that a lead
+ * arrives the way production leads arrive, not through a seeded row.
+ *
+ * It is a fixed, obviously-test value. The backend requires 32+ characters in
+ * every environment, and the stronger generated-secret rule applies only when
+ * `NODE_ENV=production` or `COOKIE_SECURE=true`, neither of which the E2E
+ * backend sets. This is test scaffolding, never a deployable secret.
+ */
+export const e2eWebhookSecret = 'e2e-teraso-webhook-secret-not-for-production'
+
 export function composeEnv(extra: NodeJS.ProcessEnv = {}) {
   const explicitDatabaseUrl =
     extra.TEST_DATABASE_URL ?? extra.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL

@@ -5,7 +5,12 @@ import {
   lazyRouteComponent,
 } from '@tanstack/react-router'
 
-import { cleanDealListSearch, DEAL_DETAIL_ROUTE_PATH } from './features/crm'
+import {
+  cleanDashboardPeriodSearch,
+  cleanDealBoardSearch,
+  cleanDealListSearch,
+  DEAL_DETAIL_ROUTE_PATH,
+} from './features/crm'
 import { RootLayout } from './root-layout'
 
 const rootRoute = createRootRoute({
@@ -60,9 +65,11 @@ const userHomeRoute = createRoute({
   component: lazyRouteComponent(() => import('./pages'), 'UserHomePage'),
 })
 
+/** The period is carried in the URL, so a chosen range is shareable. */
 const crmDashboardRoute = createRoute({
   getParentRoute: () => userWorkspaceRoute,
   path: '/app/dashboard',
+  validateSearch: (search: Record<string, unknown>) => cleanDashboardPeriodSearch(search),
   component: lazyRouteComponent(() => import('./pages'), 'CrmDashboardRoutePage'),
 })
 
@@ -88,9 +95,14 @@ const crmDealRoute = createRoute({
   component: lazyRouteComponent(() => import('./pages'), 'CrmDealRoutePage'),
 })
 
+/**
+ * The board shares the list's filter vocabulary minus paging and sorting, which
+ * is what lets the dashboard's counters deep-link into a filtered board.
+ */
 const crmBoardRoute = createRoute({
   getParentRoute: () => userWorkspaceRoute,
   path: '/app/board',
+  validateSearch: (search: Record<string, unknown>) => cleanDealBoardSearch(search),
   component: lazyRouteComponent(() => import('./pages'), 'CrmBoardRoutePage'),
 })
 

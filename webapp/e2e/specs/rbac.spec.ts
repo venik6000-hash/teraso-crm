@@ -1,3 +1,4 @@
+import type { Page } from '@playwright/test'
 import { e2eAdminEmail, e2eAdminPassword } from '../env'
 import { e2ePassword, expect, test, uniqueEmail } from '../helpers/test'
 
@@ -7,9 +8,8 @@ test('keeps user and administrator workspaces separate', async ({ browser, page 
   await page.goto('/admin/users')
   await expect(page).toHaveURL(/\/login\?returnTo=%2Fadmin%2Fusers$/)
   await page.getByRole('link', { name: 'Sign up' }).click()
-  await page.getByLabel('Email').fill(userEmail)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
+
+  await fillSignupCredentials(page, userEmail)
   await page.getByRole('button', { name: 'Create Account' }).click()
 
   await expect(page).toHaveURL(/\/app$/)
@@ -30,11 +30,13 @@ test('keeps user and administrator workspaces separate', async ({ browser, page 
   const adminContext = await browser.newContext()
   const adminPage = await adminContext.newPage()
   await adminPage.goto('/login')
-  await adminPage.getByLabel('Email').fill(e2eAdminEmail)
-  await adminPage.getByLabel('Password', { exact: true }).fill(e2eAdminPassword)
-  await adminPage.getByRole('button', { name: 'Login' }).click()
+  await signIn(adminPage, e2eAdminEmail, e2eAdminPassword)
 
-  await expect(adminPage).toHaveURL(/\/admin$/)
+  // Signing in lands the administrator in the CRM: they are the owner, and the
+  // product they open the app for is the CRM rather than user management. The
+  // account console stays one click away in the sidebar.
+  await expect(adminPage).toHaveURL(/\/app$/)
+  await openAdminWorkspace(adminPage)
   await expect(adminPage.getByRole('main')).toHaveCount(1)
   await expect(adminPage.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible()
   await expect(adminPage.getByRole('heading', { level: 1, name: 'Dashboard' })).toBeVisible()
@@ -45,13 +47,12 @@ test('keeps user and administrator workspaces separate', async ({ browser, page 
   // The CRM is the product and asks only for a session: the seeded
   // administrator must be able to open it, because it is the only account a
   // fresh deployment has and every notification links into it.
-  await adminPage.getByRole('link', { name: 'CRM' }).click()
+  await adminPage.getByRole('link', { name: 'CRM', exact: true }).click()
   await expect(adminPage).toHaveURL(/\/app\/deals$/)
   await expect(adminPage.getByRole('heading', { level: 1, name: 'Сделки' })).toBeVisible()
   await adminPage.goto('/app/profile')
   await expect(adminPage).toHaveURL(/\/app\/profile$/)
-  await adminPage.getByRole('link', { name: 'Администрирование' }).click()
-  await expect(adminPage).toHaveURL(/\/admin$/)
+  await openAdminWorkspace(adminPage)
 
   await adminContext.close()
 })
@@ -60,9 +61,7 @@ test('mobile workspace navigation closes the sidebar sheet', async ({ page }) =>
   const userEmail = uniqueEmail('web-e2e-mobile-sidebar')
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/signup')
-  await page.getByLabel('Email').fill(userEmail)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
+  await fillSignupCredentials(page, userEmail)
   await page.getByRole('button', { name: 'Create Account' }).click()
   await expect(page).toHaveURL(/\/app$/)
 
@@ -79,10 +78,10 @@ test('workspace navigation and account controls are keyboard operable', async ({
   page,
 }) => {
   await page.goto('/login')
-  await page.getByLabel('Email').fill(e2eAdminEmail)
-  await page.getByLabel('Password', { exact: true }).fill(e2eAdminPassword)
-  await page.getByRole('button', { name: 'Login' }).click()
-  await expect(page).toHaveURL(/\/admin$/)
+  await signIn(page, e2eAdminEmail, e2eAdminPassword)
+  // The administrator lands in the CRM and crosses into the account console.
+  await expect(page).toHaveURL(/\/app$/)
+  await openAdminWorkspace(page)
 
   const usersLink = page.getByRole('link', { name: 'Users' })
   await usersLink.focus()
@@ -125,11 +124,10 @@ test('admin data surfaces recover from errors and expose safe directory states',
   })
 
   await page.goto('/login')
-  await page.getByLabel('Email').fill(e2eAdminEmail)
-  await page.getByLabel('Password', { exact: true }).fill(e2eAdminPassword)
-  await page.getByRole('button', { name: 'Login' }).click()
+  await signIn(page, e2eAdminEmail, e2eAdminPassword)
 
-  await expect(page).toHaveURL(/\/admin$/)
+  await expect(page).toHaveURL(/\/app$/)
+  await openAdminWorkspace(page)
   await expect(page.getByRole('alert')).toContainText('Dashboard temporarily unavailable')
   await page.getByRole('button', { name: 'Try again' }).click()
   await expect(page.getByText('Total users', { exact: true })).toBeVisible()
@@ -172,9 +170,7 @@ test('admin data surfaces recover from errors and expose safe directory states',
 test('workspace account menu keeps a failed logout visible and retryable', async ({ page }) => {
   const userEmail = uniqueEmail('web-e2e-sidebar-logout')
   await page.goto('/signup')
-  await page.getByLabel('Email').fill(userEmail)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
+  await fillSignupCredentials(page, userEmail)
   await page.getByRole('button', { name: 'Create Account' }).click()
   await expect(page).toHaveURL(/\/app$/)
 
@@ -207,18 +203,15 @@ test('role mutation failures are announced inside the confirmation dialog', asyn
 }) => {
   const userEmail = uniqueEmail('web-e2e-role-error')
   await page.goto('/signup')
-  await page.getByLabel('Email').fill(userEmail)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
+  await fillSignupCredentials(page, userEmail)
   await page.getByRole('button', { name: 'Create Account' }).click()
   await expect(page).toHaveURL(/\/app$/)
 
   const adminContext = await browser.newContext()
   const adminPage = await adminContext.newPage()
   await adminPage.goto('/login')
-  await adminPage.getByLabel('Email').fill(e2eAdminEmail)
-  await adminPage.getByLabel('Password', { exact: true }).fill(e2eAdminPassword)
-  await adminPage.getByRole('button', { name: 'Login' }).click()
+  await signIn(adminPage, e2eAdminEmail, e2eAdminPassword)
+  await openAdminWorkspace(adminPage)
   await adminPage.getByRole('link', { name: 'Users' }).click()
   await adminPage.getByLabel('Search users').fill(userEmail)
   await adminPage.getByRole('button', { name: 'Search' }).click()
@@ -252,18 +245,15 @@ test('promoting a user revokes the old session and opens the admin workspace aft
   const userEmail = uniqueEmail('web-e2e-promoted-user')
 
   await page.goto('/signup')
-  await page.getByLabel('Email').fill(userEmail)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
+  await fillSignupCredentials(page, userEmail)
   await page.getByRole('button', { name: 'Create Account' }).click()
   await expect(page).toHaveURL(/\/app$/)
 
   const adminContext = await browser.newContext()
   const adminPage = await adminContext.newPage()
   await adminPage.goto('/login')
-  await adminPage.getByLabel('Email').fill(e2eAdminEmail)
-  await adminPage.getByLabel('Password', { exact: true }).fill(e2eAdminPassword)
-  await adminPage.getByRole('button', { name: 'Login' }).click()
+  await signIn(adminPage, e2eAdminEmail, e2eAdminPassword)
+  await openAdminWorkspace(adminPage)
   await adminPage.getByRole('link', { name: 'Users' }).click()
 
   await adminPage.getByLabel('Search users').fill(userEmail)
@@ -278,13 +268,71 @@ test('promoting a user revokes the old session and opens the admin workspace aft
 
   await page.reload()
   await expect(page.getByRole('button', { name: 'Login' })).toBeVisible()
-  await page.getByLabel('Email').fill(userEmail)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByRole('button', { name: 'Login' }).click()
+  await signIn(page, userEmail, e2ePassword)
 
-  await expect(page).toHaveURL(/\/admin$/)
+  // A freshly promoted administrator lands in the CRM like any other account,
+  // and the account console is now reachable from its sidebar.
+  await expect(page).toHaveURL(/\/app$/)
+  await openAdminWorkspace(page)
   await expect(page.getByRole('link', { name: 'Dashboard' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Home' })).toHaveCount(0)
 
   await adminContext.close()
 })
+
+
+/* ------------------------------------------------------------------ *
+ * Helpers
+ * ------------------------------------------------------------------ */
+
+/**
+ * Types the signup credentials and confirms they stuck.
+ *
+ * The guest pages swap their whole subtree as the session bootstrap settles
+ * (loading -> form), so a programmatic `fill` that lands mid-swap sets a value
+ * on an element that is about to be replaced, and the controlled input comes
+ * back empty. Typing key by key and asserting the result is the stable way in;
+ * the bare `fill` only looked reliable while a cold dev server kept the page
+ * slow enough to hide the race.
+ */
+async function fillSignupCredentials(page: Page, email: string) {
+  await expect(async () => {
+    await page.getByLabel('Email').click()
+    await page.getByLabel('Email').pressSequentially(email)
+    await page.getByLabel('Password', { exact: true }).click()
+    await page.getByLabel('Password', { exact: true }).pressSequentially(e2ePassword)
+    await page.getByLabel('Confirm Password').click()
+    await page.getByLabel('Confirm Password').pressSequentially(e2ePassword)
+    await expect(page.getByLabel('Email')).toHaveValue(email)
+    await expect(page.getByLabel('Password', { exact: true })).toHaveValue(e2ePassword)
+  }).toPass({ timeout: 15_000 })
+}
+
+/**
+ * Signs in, typing key by key for the same reason as `fillSignupCredentials`.
+ */
+async function signIn(page: Page, email: string, password: string) {
+  await expect(async () => {
+    await page.getByLabel('Email').click()
+    await page.getByLabel('Email').pressSequentially(email)
+    await page.getByLabel('Password', { exact: true }).click()
+    await page.getByLabel('Password', { exact: true }).pressSequentially(password)
+    await expect(page.getByLabel('Email')).toHaveValue(email)
+    await expect(page.getByLabel('Password', { exact: true })).toHaveValue(password)
+  }).toPass({ timeout: 15_000 })
+  await page.getByRole('button', { name: 'Login' }).click()
+}
+
+/**
+ * Crosses from the CRM into the account console.
+ *
+ * Every account, administrators included, lands in the CRM after signing in, so
+ * the console is reached through the sidebar. Waiting for the landing URL first
+ * keeps the click from racing the redirect that follows login.
+ */
+async function openAdminWorkspace(page: Page) {
+  const link = page.getByRole('link', { name: 'Администрирование' })
+  await expect(link).toBeVisible()
+  await link.click()
+  await expect(page).toHaveURL(/\/admin$/)
+}

@@ -2,6 +2,8 @@ import type {
   ClientDetailDto,
   ClientLookupQuery,
   ClientLookupResponse,
+  DashboardDto,
+  DashboardPeriod,
   DealActivityDto,
   DealBoardQuery,
   DealBoardResponse,
@@ -79,6 +81,19 @@ export class CrmService {
   /** The board is the list's deals grouped by active stage; it shares the clock. */
   getBoard(input: DealBoardQuery, _actor: AuthenticatedPrincipal): Promise<DealBoardResponse> {
     return this.dependencies.repository.listBoard(input, this.now())
+  }
+
+  /**
+   * The dashboard report (PRD 7.8). The period arrives already validated by the
+   * contract, and the clock is passed down because half the report is a snapshot
+   * of the present — open pipeline and the operational counters — which makes it
+   * as time-dependent as the list's urgency flags.
+   */
+  getDashboard(
+    input: DashboardPeriod,
+    _actor: AuthenticatedPrincipal,
+  ): Promise<DashboardDto> {
+    return this.dependencies.repository.reportDashboard(input, this.now())
   }
 
   async getDeal(dealId: string, _actor: AuthenticatedPrincipal): Promise<DealDetailDto> {
