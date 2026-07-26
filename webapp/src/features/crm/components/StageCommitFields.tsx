@@ -6,6 +6,7 @@ import {
   type LossReason,
 } from '@teraso-crm/contracts'
 
+import { toKyivDateTimeInput } from '@/platform/kyiv-time'
 import { LOSS_REASON_LABELS, toInstantFromKyivInput } from '../model'
 import { toFormErrors, type FormErrors } from '../validation'
 import { CrmSelectField, CrmTextField, CrmTextareaField } from './CrmField'
@@ -37,7 +38,7 @@ export function emptyStageCommitDraft(now = new Date()): StageCommitDraft {
     lossReason: null,
     // Payments are normally recorded when they land, so "now" is the right
     // default here — unlike a task, where "now" would mean "already overdue".
-    paidAt: toKyivNow(now),
+    paidAt: toKyivDateTimeInput(now.toISOString()),
   }
 }
 
@@ -138,18 +139,4 @@ export function StageCommitFields({
       />
     </div>
   )
-}
-
-/** `YYYY-MM-DDTHH:mm` for the current Kyiv wall-clock time. */
-function toKyivNow(now: Date) {
-  const kyiv = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: 'Europe/Kyiv',
-    hour12: false,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(now)
-  return kyiv.replace(' ', 'T')
 }

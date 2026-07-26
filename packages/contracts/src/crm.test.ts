@@ -568,7 +568,7 @@ describe('dashboard report', () => {
     overdueTaskCount: 0,
     noNextStepDealCount: 2,
     criticalDealCount: 0,
-    funnel: FUNNEL_TRANSITIONS.map((transition) => ({ ...transition, count: 0, share: 0 })),
+    funnel: FUNNEL_TRANSITIONS.map((transition) => ({ ...transition, count: 0, share: null })),
     sources: [
       {
         source: 'teraso.com.ua',
@@ -616,11 +616,19 @@ describe('dashboard report', () => {
     expect(FUNNEL_TRANSITIONS.some((step) => step.toStage === 'LOST')).toBe(false)
   })
 
-  test('keeps a conversion share a fraction and counts whole', () => {
+  /**
+   * The share is a step's own conversion, so two shapes that look wrong are
+   * legal and one that looks harmless is not.
+   */
+  test('accepts a step conversion, including none and more than all of it', () => {
     const step = { fromStage: 'NEW', toStage: 'QUALIFIED', count: 3 } as const
 
     expect(dashboardFunnelStepSchema.parse({ ...step, share: 0.75 }).share).toBe(0.75)
-    expect(() => dashboardFunnelStepSchema.parse({ ...step, share: 75 })).toThrow()
+    // No denominator inside the window: the deals arrived before it started.
+    expect(dashboardFunnelStepSchema.parse({ ...step, share: null }).share).toBeNull()
+    // A period that clears an older backlog moves more deals out of a stage
+    // than entered it, and that throughput must not be clamped away.
+    expect(dashboardFunnelStepSchema.parse({ ...step, share: 2 }).share).toBe(2)
     expect(() => dashboardFunnelStepSchema.parse({ ...step, share: -0.1 })).toThrow()
     expect(() => dashboardFunnelStepSchema.parse({ ...step, count: 2.5, share: 0.5 })).toThrow()
   })

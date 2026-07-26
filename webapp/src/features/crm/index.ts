@@ -12,6 +12,4 @@ export {
   cleanDashboardPeriodSearch,
   cleanDealBoardSearch,
   cleanDealListSearch,
-  formatDateTime,
-  formatMoney,
 } from './model'

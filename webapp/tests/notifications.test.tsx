@@ -110,6 +110,75 @@ test('never renders push delivery state as user-facing status', async () => {
   }
 })
 
+/**
+ * The inbox used to be a dead end past one page: the button was driven by the
+ * page's own entries, so once the newest 50 were read it vanished while the
+ * bell kept counting everything older, which nothing could reach.
+ */
+test('keeps clearing available and states what a press leaves behind', async () => {
+  const unread = Array.from({ length: 50 }, (_, index) =>
+    notification({ id: `${index}`.padStart(8, '0') + '-2222-4222-8222-222222222222' }),
+  )
+
+  const html = await renderInRouter(
+    <NotificationInbox notifications={unread} onMarkRead={() => {}} unreadCount={137} />,
+    '/app/notifications',
+  )
+
+  expect(html).toContain('Отметить прочитанными')
+  expect(html).toContain('Непрочитанных: 137')
+  // Says plainly that one press is not the whole backlog.
+  expect(html).toContain('За раз отмечается 50, останется ещё 87')
+})
+
+test('offers paging and an unread filter so older entries stay reachable', async () => {
+  const html = await renderInRouter(
+    <NotificationInbox
+      hasNext
+      notifications={[notification()]}
+      onNextPage={() => {}}
+      onPreviousPage={() => {}}
+      onToggleUnreadOnly={() => {}}
+      page={2}
+      unreadCount={1}
+    />,
+    '/app/notifications',
+  )
+
+  expect(html).toContain('Только непрочитанные')
+  expect(html).toContain('Дальше')
+  expect(html).toContain('Страница 2')
+})
+
+/**
+ * Marking read shares one per-IP rate bucket with every CRM write, so a 429 is
+ * its likeliest failure — and it used to fail silently, leaving the badge stuck
+ * with no explanation.
+ */
+test('shows a failed mark-read instead of leaving the badge stuck', async () => {
+  const html = await renderInRouter(
+    <NotificationInbox
+      markError="Слишком много запросов подряд. Подождите минуту и повторите."
+      notifications={[notification()]}
+      onMarkRead={() => {}}
+      unreadCount={1}
+    />,
+    '/app/notifications',
+  )
+
+  expect(html).toContain('Не удалось отметить прочитанными')
+  expect(html).toContain('Слишком много запросов подряд')
+})
+
+test('says the unread filter is empty rather than claiming there is no history', async () => {
+  const html = await renderInRouter(
+    <NotificationInbox notifications={[]} unreadCount={0} unreadOnly />,
+    '/app/notifications',
+  )
+
+  expect(html).toContain('Непрочитанных уведомлений нет')
+})
+
 test('states the empty inbox rather than rendering nothing', async () => {
   const html = await renderInRouter(
     <NotificationInbox notifications={[]} unreadCount={0} />,

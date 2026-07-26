@@ -20,6 +20,12 @@ import {
   type TaskStatus,
 } from '@teraso-crm/contracts'
 
+import {
+  formatKyivDate,
+  formatKyivDateTime,
+  toInstantFromKyivInput,
+  toKyivDateTimeInput,
+} from '@/platform/kyiv-time'
 import { urlQueryState } from '@/platform/url-query-state'
 import { toFormErrors, type FormErrors } from './validation'
 
@@ -172,34 +178,13 @@ export function formatMoney(amount: string | null | undefined) {
 }
 
 /**
- * Instants arrive as UTC; the owner works in Kyiv (PRD 10), so every timestamp
- * is presented in `Europe/Kyiv` rather than in the browser's own zone.
+ * Timestamps are presented in Europe/Kyiv (PRD 10). The formatters themselves
+ * live in `@/platform/kyiv-time`: they carry no CRM meaning and the notification
+ * centre renders the same instants, so keeping them here made that feature
+ * import this one for a date formatter and closed an import cycle.
  */
-const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', {
-  timeZone: 'Europe/Kyiv',
-  day: '2-digit',
-  month: '2-digit',
-  year: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-})
-
-const dateFormatter = new Intl.DateTimeFormat('ru-RU', {
-  timeZone: 'Europe/Kyiv',
-  day: '2-digit',
-  month: '2-digit',
-  year: 'numeric',
-})
-
-export function formatDateTime(iso: string | null | undefined) {
-  const date = toDate(iso)
-  return date ? normalizeSpaces(dateTimeFormatter.format(date)) : '—'
-}
-
-export function formatDate(iso: string | null | undefined) {
-  const date = toDate(iso)
-  return date ? normalizeSpaces(dateFormatter.format(date)) : '—'
-}
+export const formatDateTime = formatKyivDateTime
+export const formatDate = formatKyivDate
 
 /**
  * Phones are stored in normalized international form and shown grouped
@@ -256,64 +241,6 @@ export function contactLinks(phoneNormalized: string) {
     whatsapp: 'https://wa.me/' + number,
     viber: 'viber://chat?number=%2B' + number,
   }
-}
-
-/**
- * `<input type="datetime-local">` speaks the browser's own zone, but PRD 10
- * pins task and payment times to `Europe/Kyiv` and the dashboard attributes
- * money to Kyiv day boundaries. A device set to another zone would therefore
- * record a payment on the wrong day, so the two helpers below convert against
- * Kyiv explicitly instead of trusting the host clock.
- */
-const KYIV_TIME_ZONE = 'Europe/Kyiv'
-
-const kyivPartsFormatter = new Intl.DateTimeFormat('en-CA', {
-  timeZone: KYIV_TIME_ZONE,
-  hour12: false,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-})
-
-/** How far Kyiv wall-clock time is ahead of UTC at a given instant. */
-function kyivOffsetMs(instant: Date) {
-  const parts = Object.fromEntries(
-    kyivPartsFormatter.formatToParts(instant).map((part) => [part.type, part.value]),
-  )
-  const wallClock = Date.UTC(
-    Number(parts.year),
-    Number(parts.month) - 1,
-    Number(parts.day),
-    Number(parts.hour) % 24,
-    Number(parts.minute),
-    Number(parts.second),
-  )
-  return wallClock - instant.getTime()
-}
-
-/** UTC instant -> the `YYYY-MM-DDTHH:mm` Kyiv value a date-time input shows. */
-export function toKyivDateTimeInput(iso: string | null | undefined) {
-  const date = toDate(iso)
-  if (!date) return ''
-  return new Date(date.getTime() + kyivOffsetMs(date)).toISOString().slice(0, 16)
-}
-
-/** The inverse: a Kyiv `YYYY-MM-DDTHH:mm` value -> a UTC instant for the API. */
-export function toInstantFromKyivInput(value: string) {
-  if (!value) return ''
-  const asUtc = new Date(`${value.length === 16 ? `${value}:00` : value}Z`)
-  if (Number.isNaN(asUtc.getTime())) return ''
-  const firstPass = new Date(asUtc.getTime() - kyivOffsetMs(asUtc))
-  // One correction pass, because the offset that applies to the resulting
-  // instant is not always the one that applied to the guess. The two DST hours
-  // are pinned in crm-state.test.tsx: the repeated autumn hour resolves to its
-  // second pass and round trips, while the hour the spring change skips
-  // resolves an hour later and deliberately does not round trip — a wall-clock
-  // time that never happened is answered with the real instant instead.
-  return new Date(asUtc.getTime() - kyivOffsetMs(firstPass)).toISOString()
 }
 
 /* ------------------------------------------------------------------ *
@@ -540,14 +467,21 @@ export const toDashboardPeriodSearch = dashboardUrlState.serialize
 export const cleanDashboardPeriodSearch = dashboardUrlState.clean
 
 /**
- * A conversion share as a whole percentage.
+ * A step conversion as a whole percentage.
  *
  * The server sends a fraction because a percentage is a presentation choice;
  * rounding here keeps the funnel readable without ever letting the browser
  * recompute the ratio from two counts.
+ *
+ * `null` means the window held no movement INTO that stage to convert from —
+ * the top of the funnel, or deals that arrived before the period. It is shown
+ * as «—», never as 0%, which would claim a conversion failure that did not
+ * happen.
  */
-export function formatShare(share: number) {
-  return `${Math.round(share * 100)}%`
+export { toInstantFromKyivInput, toKyivDateTimeInput }
+
+export function formatShare(share: number | null) {
+  return share === null ? '—' : `${Math.round(share * 100)}%`
 }
 
 /* ------------------------------------------------------------------ *
@@ -649,12 +583,6 @@ export function shouldPromptNextStep(deal: DealDetailDto, completedTaskId: strin
 /* ------------------------------------------------------------------ *
  * Local helpers
  * ------------------------------------------------------------------ */
-
-function toDate(iso: string | null | undefined) {
-  if (!iso) return null
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? null : date
-}
 
 /** Intl separates digit groups with a no-break space; a plain one renders the same. */
 function normalizeSpaces(value: string) {

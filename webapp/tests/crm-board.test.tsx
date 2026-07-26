@@ -170,6 +170,26 @@ test('keeps a card in its served column while a move is still pending', async ()
   expect(card).toBeLessThan(prepaymentColumn)
 })
 
+/**
+ * WON is a column nothing leaves, so it is capped server-side. The header has
+ * to say so: a column showing 2 cards under a «360 шт.» badge with no
+ * explanation reads as lost data.
+ */
+test('says how much of a capped column is not on screen', async () => {
+  const capped: DealBoardResponse = {
+    columns: ACTIVE_DEAL_STAGES.map((stage) => ({
+      stage,
+      totalCount: stage === 'WON' ? 360 : 0,
+      deals: stage === 'WON' ? [summary({ stage: 'WON' })] : [],
+    })),
+  }
+
+  const html = await renderInRouter(<DealBoard board={capped} />, '/app/board')
+
+  expect(html).toContain('360 шт.')
+  expect(html).toContain('Показано 1 из 360')
+})
+
 test('states an empty column instead of rendering a blank area', async () => {
   const html = await renderInRouter(<DealBoard board={board([])} />, '/app/board')
   expect(html).toContain('Пусто')

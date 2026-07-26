@@ -56,14 +56,21 @@ export function DashboardMetrics({ report }: { report: DashboardDto }) {
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-4 lg:grid-cols-5">
           <CounterCell label="Новых заявок" value={report.newLeadCount} />
+          {/*
+            These two count TASKS, so they link to the task queue rather than to
+            the deal list. The deal filters select DEALS whose nearest active
+            task is overdue, which is a different number — clicking «5» and
+            landing on three rows is the kind of quiet contradiction that makes
+            an owner stop trusting the dashboard.
+          */}
           <CounterCell
             label="Задач на сегодня"
-            search={{ dueToday: true }}
+            to="/app/tasks"
             value={report.tasksDueTodayCount}
           />
           <CounterCell
             label="Просроченных задач"
-            search={{ overdue: true }}
+            to="/app/tasks"
             value={report.overdueTaskCount}
           />
           <CounterCell
@@ -109,20 +116,23 @@ function MoneyCard({
 }
 
 /**
- * A counter, linked to the list it describes when there is a filter for it.
+ * A counter, linked to the surface whose rows ARE the number it shows.
  *
- * «Новых заявок» has no link: it counts leads submitted inside the dashboard's
- * period, and the list's own date filter is a different question — linking it to
- * an unfiltered list would silently show a different number from the one
- * clicked.
+ * Two counters count deals and link into the deal list's quick filters; two
+ * count tasks and link into the task queue. «Новых заявок» has no link at all:
+ * it counts leads submitted inside the dashboard's period, and the list's own
+ * date filter is a different question, so any destination would show a
+ * different number from the one that was clicked.
  */
 function CounterCell({
   label,
   search,
+  to,
   value,
 }: {
   label: string
   search?: Record<string, boolean>
+  to?: '/app/tasks'
   value: number
 }) {
   const body = (
@@ -136,7 +146,21 @@ function CounterCell({
     </>
   )
 
-  return <div className="grid gap-1">{search ? <CounterLink search={search}>{body}</CounterLink> : body}</div>
+  if (to) {
+    return (
+      <div className="grid gap-1">
+        <Link className="grid gap-1 hover:underline" to={to}>
+          {body}
+        </Link>
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid gap-1">
+      {search ? <CounterLink search={search}>{body}</CounterLink> : body}
+    </div>
+  )
 }
 
 function CounterLink({

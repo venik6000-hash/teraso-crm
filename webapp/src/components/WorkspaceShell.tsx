@@ -25,6 +25,7 @@ import {
   navigationItemsForWorkspace,
   type WorkspaceKind,
 } from '@/features/navigation'
+import { NotificationCenter } from '@/features/notifications'
 
 const iconsByPath = {
   '/app': Home01Icon,
@@ -116,7 +117,16 @@ export function WorkspaceShell({
         user={user}
       />
       <SidebarInset>
-        <SiteHeader title={activeItem?.label ?? labels.fallbackTitle} />
+        {/*
+          The inbox belongs to the CRM workspace as a whole, not to one screen:
+          a new lead has to be visible from the profile and settings pages too.
+          The account console is the template's own English surface and has no
+          CRM notifications to show.
+        */}
+        <SiteHeader
+          actions={workspace === 'crm' ? <NotificationCenter /> : undefined}
+          title={activeItem?.label ?? labels.fallbackTitle}
+        />
         <div className="flex min-w-0 flex-1 flex-col">{children}</div>
       </SidebarInset>
     </SidebarProvider>

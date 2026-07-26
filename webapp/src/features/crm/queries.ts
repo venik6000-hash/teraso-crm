@@ -98,11 +98,17 @@ export function useDealListQuery(
   })
 }
 
+/**
+ * A deal by id. Disabled without one, because several callers hold the id only
+ * after an interaction — an unguarded query would issue `GET /api/crm/deals/`
+ * and take a 404 on every mount.
+ */
 export function useDealQuery(dealId: string) {
   const auth = useAuth()
   return useQuery({
     queryKey: crmQueryKeys.deal(dealId),
     queryFn: () => getDeal(auth.transport, dealId),
+    enabled: dealId !== '',
   })
 }
 
@@ -182,11 +188,20 @@ export function useUpdateDealMutation(dealId: string) {
   })
 }
 
-export function useChangeDealStageMutation(dealId: string) {
+/**
+ * Moves a deal through the funnel.
+ *
+ * The deal id travels in the mutation payload rather than being captured when
+ * the hook is called, matching `useUpdateTaskMutation`. That is not a style
+ * choice: the board resolves which deal moved only inside its drop handler, and
+ * a hook keyed on component state was keyed on state a plain drop never sets —
+ * so the request was addressed at an empty id and answered 404.
+ */
+export function useChangeDealStageMutation() {
   const auth = useAuth()
   const invalidate = useInvalidateCrm()
   return useMutation({
-    mutationFn: (input: DealStageChangeInput) =>
+    mutationFn: ({ dealId, input }: { dealId: string; input: DealStageChangeInput }) =>
       changeDealStage(auth.transport, dealId, input),
     onSuccess: invalidate,
   })

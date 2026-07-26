@@ -188,7 +188,18 @@ function scalarQuery({
    */
   const prepaidInPeriod = Prisma.sql`d.prepayment_paid_at >= ${start} AND d.prepayment_paid_at < ${end}`
   const paidInPeriod = Prisma.sql`d.full_payment_paid_at >= ${start} AND d.full_payment_paid_at < ${end}`
-  /** Open work only: a task still attached to a closed deal is not on anyone's list. */
+  /**
+   * Open work only: a task still attached to a closed deal is not on anyone's
+   * list.
+   *
+   * These two counters count TASK rows, which is what PRD 7.8 item 4 asks for
+   * («задач на сегодня, просроченных задач»). They are deliberately NOT built
+   * from the shared deal-urgency predicates and are therefore outside the drift
+   * guard those carry: a deal has at most one nearest task, so counting deals
+   * would answer a different question and under-report a day holding several
+   * late tasks on one deal. The dashboard links them to the task queue rather
+   * than the deal list for the same reason.
+   */
   const openTaskDeal = Prisma.sql`
     t.status = 'ACTIVE'::task_status
     AND EXISTS (SELECT 1 FROM deals d WHERE d.id = t.deal_id AND ${isOpenDealSql})
@@ -312,12 +323,20 @@ function toFunnelSteps(rows: ReadonlyArray<FunnelRow>): DashboardFunnelStepDto[]
     count: counts.get(`${transition.fromStage}->${transition.toStage}`) ?? 0,
   }))
 
-  // Normalized against the top of the funnel; see dashboardFunnelStepSchema.
-  const top = steps[0]?.count ?? 0
-  return steps.map((step) => ({
-    ...step,
-    share: top === 0 ? 0 : step.count / top,
-  }))
+  /**
+   * Each step converts against the one before it. Where there is no denominator
+   * — the first pair, or a predecessor that saw no movement inside the window —
+   * the share is null rather than zero: those deals reached the stage before the
+   * period began, and reporting them as a 0% conversion would invent a failure.
+   * See dashboardFunnelStepSchema.
+   */
+  return steps.map((step, index) => {
+    const previous = index === 0 ? null : steps[index - 1]!.count
+    return {
+      ...step,
+      share: previous === null || previous === 0 ? null : step.count / previous,
+    }
+  })
 }
 
 function toSourceRow(row: SourceRow): DashboardSourceDto {

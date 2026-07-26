@@ -131,13 +131,25 @@ function BoardColumn({
       }`}
       ref={setNodeRef}
     >
-      <header className="mb-3 flex items-center justify-between gap-2">
-        <Typography variant="control">{DEAL_STAGE_LABELS[column.stage]}</Typography>
-        {/* The count is a number and a label, so the column header is not a
-            colour-coded blob (PRD 7.0). */}
-        <Badge variant="secondary">
-          <Typography variant="controlXs">{`${column.totalCount} шт.`}</Typography>
-        </Badge>
+      <header className="mb-3 grid gap-1">
+        <div className="flex items-center justify-between gap-2">
+          <Typography variant="control">{DEAL_STAGE_LABELS[column.stage]}</Typography>
+          {/* The count is a number and a label, so the column header is not a
+              colour-coded blob (PRD 7.0). */}
+          <Badge variant="secondary">
+            <Typography variant="controlXs">{`${column.totalCount} шт.`}</Typography>
+          </Badge>
+        </div>
+        {/*
+          The column is capped server-side, and WON only ever grows, so the
+          header states what is not on screen rather than letting the count and
+          the cards silently disagree.
+        */}
+        {column.deals.length < column.totalCount && (
+          <Typography tone="muted" variant="caption">
+            {`Показано ${column.deals.length} из ${column.totalCount}`}
+          </Typography>
+        )}
       </header>
 
       <div className="grid gap-2">
@@ -168,7 +180,9 @@ function DraggableCard({
   isDragging: boolean
   isPending: boolean
 }) {
-  const { attributes, listeners, setNodeRef } = useDraggable({ id: deal.id })
+  // `setActivatorNodeRef` points dnd-kit at the handle, so the draggable node
+  // stays the whole card while only the handle starts a drag.
+  const { attributes, listeners, setActivatorNodeRef, setNodeRef } = useDraggable({ id: deal.id })
 
   return (
     <div ref={setNodeRef}>
@@ -184,7 +198,7 @@ function DraggableCard({
       )}
       <DealBoardCard
         deal={deal}
-        dragHandle={{ ...attributes, ...listeners }}
+        dragHandle={{ ...attributes, ...listeners, ref: setActivatorNodeRef }}
         isDragging={isDragging}
       />
     </div>

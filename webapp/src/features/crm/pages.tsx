@@ -36,10 +36,11 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Typography } from '@/components/typography'
 import { useAuth } from '@/features/auth'
+import { kyivToday } from '@/platform/kyiv-time'
 import {
-  NotificationBell,
   NotificationInbox,
   PushPermissionCard,
+  toRussianTransportMessage,
   useMarkNotificationsReadMutation,
   useNotificationInboxQuery,
   usePushSubscription,
@@ -87,6 +88,9 @@ import {
   useUpdateDealMutation,
   useUpdateTaskMutation,
 } from './queries'
+
+/** One page of the inbox is one mark-read request. */
+const NOTIFICATIONS_PAGE_SIZE = 50
 
 /**
  * The CRM screens: dashboard, list, card, board, task queue and notifications.
@@ -247,7 +251,7 @@ export function DealPage({ dealId }: { dealId: string }) {
   const auth = useAuth()
   const deal = useDealQuery(dealId)
   const updateDeal = useUpdateDealMutation(dealId)
-  const changeStage = useChangeDealStageMutation(dealId)
+  const changeStage = useChangeDealStageMutation()
   const addNote = useAddDealNoteMutation(dealId)
   const createTask = useCreateTaskMutation(dealId)
 
@@ -287,7 +291,10 @@ export function DealPage({ dealId }: { dealId: string }) {
             toast.success('Запись добавлена')
           }}
           onChangeStage={(input) =>
-            changeStage.mutate(input, { onSuccess: () => toast.success('Этап изменён') })
+            changeStage.mutate(
+              { dealId, input },
+              { onSuccess: () => toast.success('Этап изменён') },
+            )
           }
           onCreateTask={(input) =>
             createTask.mutate(input, { onSuccess: () => toast.success('Задача создана') })
@@ -356,7 +363,7 @@ export function BoardPage({ search }: { search: Partial<DealBoardQuery> }) {
   const query = parseDealBoardSearch(search)
   const board = useDealBoardQuery(query)
   const [move, setMove] = useState<{ deal: DealSummaryDto; stage: DealStage } | null>(null)
-  const changeStage = useChangeDealStageMutation(move?.deal.id ?? '')
+  const changeStage = useChangeDealStageMutation()
 
   const handleDrop = (deal: DealSummaryDto, intent: BoardDropIntent) => {
     if (intent.kind === 'ignored') return
@@ -369,19 +376,27 @@ export function BoardPage({ search }: { search: Partial<DealBoardQuery> }) {
     setMove({ deal, stage: intent.kind === 'loss' ? 'LOST' : intent.stage })
   }
 
+  /**
+   * The deal is carried in the payload, so a confirmation-free drop reaches the
+   * right deal without the dialog state ever being set.
+   */
   const commit = (deal: DealSummaryDto, input: DealStageChangeInput) =>
-    changeStage.mutate(input, {
-      onSuccess: () => {
-        setMove(null)
-        toast.success(`${deal.client.name}: ${DEAL_STAGE_LABELS[input.stage]}`)
+    changeStage.mutate(
+      { dealId: deal.id, input },
+      {
+        onSuccess: () => {
+          setMove(null)
+          toast.success(`${deal.client.name}: ${DEAL_STAGE_LABELS[input.stage]}`)
+        },
+        // A rejection — including the 400 a racing second drag gets from the
+        // per-deal lock — clears the pending move, leaves the card in its
+        // column and says why, in the words the server chose.
+        onError: (error) => {
+          setMove(null)
+          toast.error(toRussianTransportMessage(error))
+        },
       },
-      // A rejection — including the 400 a racing second drag gets from the
-      // per-deal lock — leaves the card in its column and says why.
-      onError: (error) => {
-        setMove(null)
-        toast.error(error.message)
-      },
-    })
+    )
 
   return (
     <CrmPage
@@ -550,14 +565,30 @@ function BoardFilterToggle({
 }
 
 export function NotificationsPage() {
-  const inbox = useNotificationInboxQuery({ page: 1, pageSize: 50, unreadOnly: false })
+  const [page, setPage] = useState(1)
+  const [unreadOnly, setUnreadOnly] = useState(false)
+  const inbox = useNotificationInboxQuery({ page, pageSize: NOTIFICATIONS_PAGE_SIZE, unreadOnly })
   const markRead = useMarkNotificationsReadMutation()
   const push = usePushSubscription()
 
-  // Opening this screen IS reading the inbox, so the batch goes out once here
-  // rather than one request per entry the owner happens to click.
   const items = inbox.data?.items ?? []
-  const hasUnread = items.some((entry) => entry.readAt === null)
+
+  /**
+   * One press clears one page. Narrowing the list to unread and returning to
+   * the first page is what makes the next press reach the NEXT batch — without
+   * it the same newest entries came back read, the control disappeared and
+   * everything older stayed permanently unreachable while the bell still
+   * counted it.
+   */
+  const markCurrentPage = () =>
+    markRead.mutate(items, {
+      onSuccess: (result) => {
+        if (result && result.unreadCount > 0) {
+          setUnreadOnly(true)
+          setPage(1)
+        }
+      },
+    })
 
   return (
     <CrmPage
@@ -571,28 +602,69 @@ export function NotificationsPage() {
         permission={push.permission}
       />
 
-      {hasUnread && (
-        <div>
-          <Button
-            disabled={markRead.isPending}
-            onClick={() => markRead.mutate(items)}
-            type="button"
-            variant="outline"
-          >
-            <Typography variant="control">Отметить прочитанными</Typography>
-          </Button>
-        </div>
-      )}
-
       <NotificationInbox
         error={inbox.isError ? inbox.error : null}
+        hasNext={inbox.data?.hasNext ?? false}
         isError={inbox.isError}
+        isMarking={markRead.isPending}
         isPending={inbox.isPending}
+        markError={markRead.isError ? toRussianTransportMessage(markRead.error) : null}
         notifications={items}
+        onMarkRead={markCurrentPage}
+        onNextPage={() => setPage((current) => current + 1)}
+        onPreviousPage={() => setPage((current) => Math.max(1, current - 1))}
         onRetry={() => void inbox.refetch()}
+        onToggleUnreadOnly={(next) => {
+          setUnreadOnly(next)
+          setPage(1)
+        }}
+        page={page}
         unreadCount={inbox.data?.unreadCount ?? 0}
+        unreadOnly={unreadOnly}
       />
     </CrmPage>
+  )
+}
+
+/**
+ * The custom range, held locally until it is applied.
+ *
+ * Each keystroke used to navigate, and `validateSearch` repairs an invalid
+ * search by resetting it — so clearing one date, or passing through a moment
+ * where `from` is after `to`, dropped the whole period back to «Месяц» while the
+ * owner was still typing. The draft is local and only a complete, ordered range
+ * is applied.
+ */
+function CustomRangeFields({
+  onApply,
+  period,
+}: {
+  onApply: (period: DashboardPeriod) => void
+  period: DashboardPeriod
+}) {
+  const [from, setFrom] = useState(period.from ?? kyivToday())
+  const [to, setTo] = useState(period.to ?? kyivToday())
+  const isOrdered = from !== '' && to !== '' && from <= to
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+      <CrmTextField label="Начало периода" onChange={setFrom} type="date" value={from} />
+      <CrmTextField
+        error={from && to && from > to ? 'Начало периода позже его конца' : null}
+        label="Конец периода"
+        onChange={setTo}
+        type="date"
+        value={to}
+      />
+      <Button
+        disabled={!isOrdered}
+        onClick={() => onApply({ period: 'custom', from, to })}
+        type="button"
+        variant="outline"
+      >
+        <Typography variant="control">Применить</Typography>
+      </Button>
+    </div>
   )
 }
 
@@ -617,8 +689,8 @@ function DashboardPeriodControls({
                 option === 'custom'
                   ? {
                       period: 'custom',
-                      from: range?.from ?? todayInKyiv(),
-                      to: range?.to ?? todayInKyiv(),
+                      from: range?.from ?? kyivToday(),
+                      to: range?.to ?? kyivToday(),
                     }
                   : { period: option },
               )
@@ -633,20 +705,7 @@ function DashboardPeriodControls({
       </div>
 
       {period.period === 'custom' && (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <CrmTextField
-            label="Начало периода"
-            onChange={(value) => onChange({ ...period, from: value })}
-            type="date"
-            value={period.from ?? ''}
-          />
-          <CrmTextField
-            label="Конец периода"
-            onChange={(value) => onChange({ ...period, to: value })}
-            type="date"
-            value={period.to ?? ''}
-          />
-        </div>
+        <CustomRangeFields onApply={onChange} period={period} />
       )}
 
       {range && (
@@ -656,11 +715,6 @@ function DashboardPeriodControls({
       )}
     </div>
   )
-}
-
-/** The Kyiv calendar date, so a custom range starts on the owner's today. */
-function todayInKyiv() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv' }).format(new Date())
 }
 
 function RetryAlert({
@@ -715,48 +769,16 @@ function CrmPage({
 /**
  * The header every CRM screen shares.
  *
- * The inbox lives here rather than only on `/app/notifications` so a new lead
- * is visible from wherever the owner happens to be working, which is the whole
- * point of an inbox that stays the source of truth when push is denied.
+ * The notification centre is NOT here: it is mounted once by the workspace
+ * shell, so it is present on the profile and settings screens too — which this
+ * page shell does not wrap.
  */
 function HeaderActions({ children }: { children?: ReactNode }) {
   return (
     <div className="flex flex-wrap gap-2">
       <CommandSearch />
-      <HeaderNotifications />
       {children}
     </div>
-  )
-}
-
-function HeaderNotifications() {
-  const [isOpen, setIsOpen] = useState(false)
-  const inbox = useNotificationInboxQuery({ page: 1, pageSize: 20, unreadOnly: false })
-  const markRead = useMarkNotificationsReadMutation()
-  const items = inbox.data?.items ?? []
-
-  return (
-    <NotificationBell
-      onOpenChange={(open) => {
-        setIsOpen(open)
-        // Opening the inbox IS reading it, and the whole page is marked in one
-        // batched request rather than one per entry — that endpoint shares a
-        // rate bucket with every CRM write.
-        if (open && items.length > 0) markRead.mutate(items)
-      }}
-      open={isOpen}
-      unreadCount={inbox.data?.unreadCount ?? 0}
-    >
-      <NotificationInbox
-        error={inbox.isError ? inbox.error : null}
-        isError={inbox.isError}
-        isPending={inbox.isPending}
-        notifications={items}
-        onOpen={() => setIsOpen(false)}
-        onRetry={() => void inbox.refetch()}
-        unreadCount={inbox.data?.unreadCount ?? 0}
-      />
-    </NotificationBell>
   )
 }
 

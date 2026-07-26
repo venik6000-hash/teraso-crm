@@ -1,6 +1,7 @@
 import {
   ACTIVE_DEAL_STAGES,
   CLIENT_DETAIL_DEAL_LIMIT,
+  DEAL_BOARD_COLUMN_LIMIT,
   DEALS_MAX_PAGE,
   NEXT_STEP_GRACE_MINUTES,
   OPEN_DEAL_STAGES,
@@ -142,20 +143,40 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
      * `listDeals`, adding only the active-stage restriction (LOST never gets a
      * column) so urgency is computed once and cannot drift between the two views.
      */
+    /**
+     * Each column is capped at DEAL_BOARD_COLUMN_LIMIT rows while `totalCount`
+     * keeps counting the whole column.
+     *
+     * The ranking and the count are one window pass over the same filtered set,
+     * so the cap applies before hydration: WON is a column nothing ever leaves,
+     * and without this the response, the `findMany` behind it and the browser's
+     * drag context all grew with every deal ever won.
+     */
     async listBoard(query, now) {
       const conditions = [Prisma.sql`d.stage IN ${activeStagesSql}`, ...listConditions(query, now)]
-      const rows = await db.$queryRaw<Array<{ id: string }>>(
+      const rows = await db.$queryRaw<Array<{ id: string; stage: DealStage; total_in_stage: bigint }>>(
         Prisma.sql`
-          SELECT d.id
-          FROM deals d
-          JOIN clients c ON c.id = d.client_id
-          ${nearestActiveTaskLateral}
-          WHERE ${Prisma.join(conditions, ' AND ')}
-          ORDER BY d.submitted_at DESC, d.id DESC
+          SELECT ranked.id, ranked.stage, ranked.total_in_stage
+          FROM (
+            SELECT
+              d.id,
+              d.stage,
+              ROW_NUMBER() OVER (
+                PARTITION BY d.stage ORDER BY d.submitted_at DESC, d.id DESC
+              ) AS position_in_stage,
+              COUNT(*) OVER (PARTITION BY d.stage) AS total_in_stage
+            FROM deals d
+            JOIN clients c ON c.id = d.client_id
+            ${nearestActiveTaskLateral}
+            WHERE ${Prisma.join(conditions, ' AND ')}
+          ) ranked
+          WHERE ranked.position_in_stage <= ${DEAL_BOARD_COLUMN_LIMIT}
+          ORDER BY ranked.stage, ranked.position_in_stage
         `,
       )
 
       const orderedIds = rows.map((row) => row.id)
+      const totalsByStage = new Map(rows.map((row) => [row.stage, Number(row.total_in_stage)]))
       const deals = await db.deal.findMany({
         where: { id: { in: orderedIds } },
         select: dealSummarySelect,
@@ -169,7 +190,13 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
       return {
         columns: ACTIVE_DEAL_STAGES.map((stage) => {
           const dealsForStage = summaries.filter((summary) => summary.stage === stage)
-          return { stage, totalCount: dealsForStage.length, deals: dealsForStage }
+          return {
+            stage,
+            // An empty column has no row to carry its window count, and its
+            // true total is zero anyway.
+            totalCount: totalsByStage.get(stage) ?? 0,
+            deals: dealsForStage,
+          }
         }),
       } satisfies DealBoardResponse
     },

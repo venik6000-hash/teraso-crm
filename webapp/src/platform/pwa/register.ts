@@ -113,6 +113,25 @@ export function toPushSubscriptionPayload(subscription: PushSubscription) {
 }
 
 /**
+ * Listens for the worker's report that the push service rotated the
+ * subscription.
+ *
+ * The worker re-subscribes on its own, but only the page can authenticate to
+ * the API, so it forwards the new subscription here. Without this the rotated
+ * endpoint is only registered the next time the app is opened — which is
+ * exactly what someone relying on push is not doing.
+ */
+export function onPushSubscriptionChanged(handler: () => void): () => void {
+  if (!isServiceWorkerSupported()) return () => {}
+
+  const listener = (event: MessageEvent) => {
+    if (event.data && event.data.type === 'push-subscription-changed') handler()
+  }
+  navigator.serviceWorker.addEventListener('message', listener)
+  return () => navigator.serviceWorker.removeEventListener('message', listener)
+}
+
+/**
  * VAPID keys are URL-safe base64; `applicationServerKey` wants raw bytes.
  *
  * The conversion is done here rather than by handing the string straight to

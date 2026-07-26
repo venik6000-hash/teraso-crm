@@ -26,10 +26,10 @@ function report(overrides: Partial<DashboardDto> = {}): DashboardDto {
     noNextStepDealCount: 5,
     criticalDealCount: 6,
     funnel: [
-      { fromStage: 'NEW', toStage: 'QUALIFIED', count: 4, share: 1 },
+      { fromStage: 'NEW', toStage: 'QUALIFIED', count: 4, share: null },
       { fromStage: 'QUALIFIED', toStage: 'PROPOSAL_SENT', count: 4, share: 1 },
       { fromStage: 'PROPOSAL_SENT', toStage: 'PREPAYMENT', count: 3, share: 0.75 },
-      { fromStage: 'PREPAYMENT', toStage: 'WON', count: 2, share: 0.5 },
+      { fromStage: 'PREPAYMENT', toStage: 'WON', count: 2, share: 2 / 3 },
     ],
     sources: [
       {
@@ -104,16 +104,20 @@ test('labels every adjacent transition with its count and share', () => {
 })
 
 test('states an empty funnel rather than drawing a blank chart', () => {
-  const empty = FUNNEL_TRANSITIONS.map((transition) => ({ ...transition, count: 0, share: 0 }))
+  const empty = FUNNEL_TRANSITIONS.map((transition) => ({ ...transition, count: 0, share: null }))
   const html = renderToStaticMarkup(<FunnelChart funnel={empty} />)
 
   expect(html).toContain('За период переходов между этапами не было')
 })
 
-test('formats a share as a whole percentage', () => {
+test('formats a share as a whole percentage and names a missing one', () => {
   expect(formatShare(0.75)).toBe('75%')
   expect(formatShare(1)).toBe('100%')
   expect(formatShare(0)).toBe('0%')
+  // A period that cleared an older backlog genuinely converts above 100%.
+  expect(formatShare(2)).toBe('200%')
+  // No movement into the stage to convert from — not a 0% conversion.
+  expect(formatShare(null)).toBe('—')
 })
 
 /* ------------------------------------------------------------------ *
@@ -166,10 +170,19 @@ test('names every period in Russian', () => {
  * `isCritical` has a URL representation but no control of its own in the filter
  * bar.
  */
-test('links the operational counters into the filtered deal list', async () => {
+/**
+ * A counter must land on the surface whose rows are the number it shows. The
+ * two task counters used to link into deal filters, which select deals by their
+ * nearest task — click «Просроченных задач: 5», land on three rows.
+ */
+test('links each counter to the surface that matches what it counts', async () => {
   const html = await renderInRouter(<DashboardMetrics report={report()} />, '/app/dashboard')
 
+  // Deal counters keep their deal-list quick filters.
   expect(html).toContain('isCritical')
-  expect(html).toContain('overdue')
   expect(html).toContain('noNextStep')
+  // Task counters point at the queue instead.
+  expect(html).toContain('href="/app/tasks"')
+  expect(html).not.toContain('overdue=true')
+  expect(html).not.toContain('dueToday=true')
 })

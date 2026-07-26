@@ -7,6 +7,7 @@ import {
   currentPushPermission,
   ensurePushSubscription,
   isPushSupported,
+  onPushSubscriptionChanged,
   registerServiceWorker,
   requestPushPermission,
   toPushSubscriptionPayload,
@@ -67,6 +68,12 @@ export function useMarkNotificationsReadMutation() {
       if (!result) return
       void queryClient.invalidateQueries({ queryKey: ['notifications'] })
     },
+    /**
+     * A failure here is surfaced by the caller through `isError`, never
+     * swallowed. This endpoint shares one per-IP bucket with every CRM write,
+     * so a 429 is its most likely failure — and a silent one would leave the
+     * unread badge stuck with no explanation.
+     */
   })
 }
 
@@ -112,14 +119,23 @@ export function usePushSubscription(): PushSubscriptionState {
     if (!auth.isAuthenticated || readPermission() !== 'granted') return
 
     let cancelled = false
-    void synchronize(true).catch((cause) => {
-      // A deployment without VAPID keys answers 404 here. That is a supported
-      // configuration, not a failure the owner needs to see: the inbox is the
-      // source of truth either way, so it is logged and swallowed.
-      if (!cancelled) console.warn('[notifications] push refresh failed', cause)
-    })
+    const refresh = () =>
+      void synchronize(true).catch((cause) => {
+        // A deployment without VAPID keys answers 404 here. That is a supported
+        // configuration, not a failure the owner needs to see: the inbox is the
+        // source of truth either way, so it is logged and swallowed.
+        if (!cancelled) console.warn('[notifications] push refresh failed', cause)
+      })
+
+    refresh()
+    // The push service can rotate the subscription while the app is open; the
+    // worker re-subscribes and tells the page, which is the only side that can
+    // authenticate the re-registration.
+    const stopListening = onPushSubscriptionChanged(refresh)
+
     return () => {
       cancelled = true
+      stopListening()
     }
   }, [auth.isAuthenticated, synchronize])
 

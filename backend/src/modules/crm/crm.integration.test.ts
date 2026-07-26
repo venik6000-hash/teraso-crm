@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import {
   ACTIVE_DEAL_STAGES,
   CLIENT_DETAIL_DEAL_LIMIT,
+  DEAL_BOARD_COLUMN_LIMIT,
   clientDetailResponseSchema,
   clientLookupResponseSchema,
   criticalTasksResponseSchema,
@@ -1576,6 +1577,29 @@ maybeDescribe('CRM clients, deals and history integration', () => {
       expect(newColumn.deals[0]?.nearestActiveTask?.title).toBe('Просроченный первый контакт')
     })
 
+    /**
+     * WON is a column nothing ever leaves, so an uncapped board would carry
+     * every deal ever won in one response and mount a draggable for each.
+     */
+    test('caps each column while still reporting its true size', async () => {
+      const overLimit = DEAL_BOARD_COLUMN_LIMIT + 3
+      for (let index = 0; index < overLimit; index += 1) {
+        await createDeal({
+          name: `Заявка ${index}`,
+          phone: `+3806711${String(index).padStart(5, '0')}`,
+          source: 'teraso.com.ua',
+        })
+      }
+
+      const board = await getBoard()
+      const newColumn = boardColumn(board, 'NEW')
+
+      expect(newColumn.deals).toHaveLength(DEAL_BOARD_COLUMN_LIMIT)
+      // The count stays honest so the interface can say what it is not showing.
+      expect(newColumn.totalCount).toBe(overLimit)
+      expect(boardColumn(board, 'WON').totalCount).toBe(0)
+    })
+
     test('applies the list filters to the board', async () => {
       const target = await createDeal({
         name: 'Сайт',
@@ -1734,12 +1758,86 @@ maybeDescribe('CRM clients, deals and history integration', () => {
 
       const report = await getDashboard('period=month')
 
+      // Each share is the step's own conversion against the step before it; the
+      // first pair has no denominator, so it reports null rather than a number.
       expect(report.funnel).toEqual([
-        { fromStage: 'NEW', toStage: 'QUALIFIED', count: 4, share: 1 },
+        { fromStage: 'NEW', toStage: 'QUALIFIED', count: 4, share: null },
         { fromStage: 'QUALIFIED', toStage: 'PROPOSAL_SENT', count: 4, share: 1 },
         { fromStage: 'PROPOSAL_SENT', toStage: 'PREPAYMENT', count: 3, share: 0.75 },
-        { fromStage: 'PREPAYMENT', toStage: 'WON', count: 2, share: 0.5 },
+        { fromStage: 'PREPAYMENT', toStage: 'WON', count: 2, share: 2 / 3 },
       ])
+    })
+
+    /**
+     * A window can clear a backlog that built up before it: deals that reached a
+     * stage earlier all advance during the period, so more leave that stage than
+     * entered it. The share is genuinely above 1, and clamping it to 1 — or
+     * normalizing against the first step, which cannot exceed itself — would
+     * hide real throughput and, worse, produce a body the response contract
+     * rejects outright, taking the whole dashboard down.
+     */
+    test('reports a share above one when a period clears an older backlog', async () => {
+      // Two deals reach PROPOSAL_SENT well before the reported window.
+      const first = await createDeal({
+        name: 'Из прошлого месяца',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      const second = await createDeal({
+        name: 'Тоже из прошлого месяца',
+        phone: '+380671110002',
+        source: 'teraso.com.ua',
+      })
+      for (const deal of [first, second]) {
+        await changeStage(deal.id, { stage: 'QUALIFIED' })
+        await changeStage(deal.id, { stage: 'PROPOSAL_SENT' })
+      }
+      await backdateStageActivities(2)
+
+      // Inside the window only the two prepayments happen.
+      for (const deal of [first, second]) {
+        await changeStage(deal.id, {
+          stage: 'PREPAYMENT',
+          prepaymentAmount: '10000',
+          prepaymentPaidAt: new Date().toISOString(),
+        })
+      }
+
+      const report = await getDashboard('period=today')
+      const byPair = Object.fromEntries(
+        report.funnel.map((step) => [`${step.fromStage}->${step.toStage}`, step]),
+      )
+
+      expect(byPair['QUALIFIED->PROPOSAL_SENT']).toMatchObject({ count: 0, share: null })
+      // Two deals advanced out of a stage nobody entered during the window.
+      expect(byPair['PROPOSAL_SENT->PREPAYMENT']).toMatchObject({ count: 2, share: null })
+      expect(byPair['NEW->QUALIFIED']).toMatchObject({ count: 0, share: null })
+    })
+
+    /** A step whose predecessor moved once and which itself moved twice. */
+    test('reports the step conversion above one against a smaller predecessor', async () => {
+      const older = await createDeal({
+        name: 'Ранее квалифицирована',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(older.id, { stage: 'QUALIFIED' })
+      await backdateStageActivities(2)
+
+      const fresh = await createDeal({
+        name: 'Свежая',
+        phone: '+380671110002',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(fresh.id, { stage: 'QUALIFIED' })
+      // One deal entered QUALIFIED today, two left it.
+      await changeStage(older.id, { stage: 'PROPOSAL_SENT' })
+      await changeStage(fresh.id, { stage: 'PROPOSAL_SENT' })
+
+      const report = await getDashboard('period=today')
+      const step = report.funnel.find((entry) => entry.fromStage === 'QUALIFIED')
+
+      expect(step).toMatchObject({ count: 2, share: 2 })
     })
 
     test('leaves the funnel untouched when a closed deal is reopened', async () => {
@@ -2095,6 +2193,17 @@ maybeDescribe('CRM clients, deals and history integration', () => {
     const column = board.columns.find((entry) => entry.stage === stage)
     if (!column) throw new Error(`board is missing the ${stage} column`)
     return column
+  }
+
+  /**
+   * Ages every stage transition written so far, so a following move lands
+   * inside the reported window while its predecessor sits outside it.
+   */
+  async function backdateStageActivities(days: number) {
+    await prisma.dealActivity.updateMany({
+      where: { kind: 'STAGE_CHANGED' },
+      data: { createdAt: new Date(Date.now() - days * 24 * 60 * 60 * 1000) },
+    })
   }
 
   function dashboardRequest(query: string) {

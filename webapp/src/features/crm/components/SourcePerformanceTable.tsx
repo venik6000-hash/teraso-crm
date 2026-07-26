@@ -1,4 +1,4 @@
-import type { DashboardSourceDto } from '@teraso-crm/contracts'
+import { DASHBOARD_SOURCE_LIMIT, type DashboardSourceDto } from '@teraso-crm/contracts'
 
 import {
   Card,
@@ -52,51 +52,63 @@ export function SourcePerformanceTable({
             За период заявок не было.
           </Typography>
         ) : (
-          <div className="w-full overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead scope="col">Источник</TableHead>
-                  <TableHead scope="col">UTM Source</TableHead>
-                  <TableHead scope="col">Заявок</TableHead>
-                  <TableHead scope="col">Открытая воронка</TableHead>
-                  <TableHead scope="col">Успешных</TableHead>
-                  <TableHead scope="col">Сумма успешных</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sources.map((row) => (
-                  <TableRow key={`${row.source}::${row.utmSource ?? ''}`}>
-                    <TableCell>
-                      <Typography variant="bodySm">{row.source}</Typography>
-                    </TableCell>
-                    <TableCell>
-                      {/* Never a blank cell: "no UTM" is a finding about the
-                          traffic, not missing data. */}
-                      <Typography tone={row.utmSource ? 'default' : 'muted'} variant="bodySm">
-                        {row.utmSource ?? 'Без UTM'}
-                      </Typography>
-                    </TableCell>
-                    <TableCell className="tabular-nums">
-                      <Typography variant="bodySm">{String(row.leadCount)}</Typography>
-                    </TableCell>
-                    <TableCell className="tabular-nums">
-                      <Typography variant="bodySm" wrap="nowrap">
-                        {formatMoney(row.openPipelineAmount)}
-                      </Typography>
-                    </TableCell>
-                    <TableCell className="tabular-nums">
-                      <Typography variant="bodySm">{String(row.wonCount)}</Typography>
-                    </TableCell>
-                    <TableCell className="tabular-nums">
-                      <Typography variant="bodySm" wrap="nowrap">
-                        {formatMoney(row.wonAmount)}
-                      </Typography>
-                    </TableCell>
+          <div className="grid gap-2">
+            {/*
+              UTM values are unbounded, so the response is capped. A table that
+              silently stopped at fifty rows would read as "these are all the
+              sources", which is the one thing it must not imply.
+            */}
+            {sources.length >= DASHBOARD_SOURCE_LIMIT && (
+              <Typography tone="muted" variant="caption">
+                {`Показаны первые ${DASHBOARD_SOURCE_LIMIT} источников по числу заявок.`}
+              </Typography>
+            )}
+            <div className="w-full overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead scope="col">Источник</TableHead>
+                    <TableHead scope="col">UTM Source</TableHead>
+                    <TableHead scope="col">Заявок</TableHead>
+                    <TableHead scope="col">Открытая воронка</TableHead>
+                    <TableHead scope="col">Успешных</TableHead>
+                    <TableHead scope="col">Сумма успешных</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {sources.map((row) => (
+                    <TableRow key={`${row.source}::${row.utmSource ?? ''}`}>
+                      <TableCell>
+                        <Typography variant="bodySm">{row.source}</Typography>
+                      </TableCell>
+                      <TableCell>
+                        {/* Never a blank cell: "no UTM" is a finding about the
+                            traffic, not missing data. */}
+                        <Typography tone={row.utmSource ? 'default' : 'muted'} variant="bodySm">
+                          {row.utmSource ?? 'Без UTM'}
+                        </Typography>
+                      </TableCell>
+                      <TableCell className="tabular-nums">
+                        <Typography variant="bodySm">{String(row.leadCount)}</Typography>
+                      </TableCell>
+                      <TableCell className="tabular-nums">
+                        <Typography variant="bodySm" wrap="nowrap">
+                          {formatMoney(row.openPipelineAmount)}
+                        </Typography>
+                      </TableCell>
+                      <TableCell className="tabular-nums">
+                        <Typography variant="bodySm">{String(row.wonCount)}</Typography>
+                      </TableCell>
+                      <TableCell className="tabular-nums">
+                        <Typography variant="bodySm" wrap="nowrap">
+                          {formatMoney(row.wonAmount)}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           </div>
         )}
       </CardContent>

@@ -7,7 +7,6 @@
   "start_url": "/app/dashboard",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
   "theme_color": "#18181b",
   "background_color": "#fafafa",
   "icons": [
@@ -16,12 +15,6 @@
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
-    },
-    {
-      "src": "/favicon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "maskable"
     }
   ]
 }

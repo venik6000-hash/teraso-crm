@@ -55,6 +55,18 @@ export const dealActivityKindSchema = z.enum([
 /** Board columns, in funnel order. LOST never occupies a column (PRD 7.3). */
 export const ACTIVE_DEAL_STAGES = ['NEW', 'QUALIFIED', 'PROPOSAL_SENT', 'PREPAYMENT', 'WON'] as const
 
+/**
+ * Cards returned per board column.
+ *
+ * The board has no paging, and WON is a column nothing ever leaves — every deal
+ * ever won stays on it — so an uncapped board grows without bound: the response
+ * carries every row, the server hydrates every one of them, and the browser
+ * mounts a draggable per card inside a single drag context. The cap bounds all
+ * three, while `totalCount` on each column keeps reporting the true size, so the
+ * interface can say how much it is not showing instead of quietly lying.
+ */
+export const DEAL_BOARD_COLUMN_LIMIT = 50
+
 /** Stages still expected to carry a next step. WON and LOST are exempt (PRD 7.4). */
 export const OPEN_DEAL_STAGES = ['NEW', 'QUALIFIED', 'PROPOSAL_SENT', 'PREPAYMENT'] as const
 
@@ -598,11 +610,16 @@ export const dealListResponseSchema = pageResponse(dealSummarySchema, {
   maxPageSize: DEALS_MAX_PAGE_SIZE,
 }).strict()
 
+/**
+ * `totalCount` is how many deals the column really holds; `deals` is the capped
+ * page of them. The two are deliberately separate numbers — a column that shows
+ * 50 of 360 has to be able to say so.
+ */
 export const dealBoardColumnSchema = z
   .object({
     stage: dealStageSchema,
     totalCount: z.number().int().nonnegative(),
-    deals: z.array(dealSummarySchema),
+    deals: z.array(dealSummarySchema).max(DEAL_BOARD_COLUMN_LIMIT),
   })
   .strict()
 
@@ -687,17 +704,29 @@ export const dashboardRangeSchema = z
  * (see dealActivitySchema), so an administrative correction never reads as a
  * conversion.
  *
- * `share` is normalized against the FIRST transition in the funnel, not against
- * the immediately preceding one. That is the only normalization under which all
- * four numbers are comparable on one chart, and step-to-step conversion is still
- * recoverable by dividing adjacent counts, whereas the reverse is not.
+ * `share` is the step's own conversion: how much of the movement that reached
+ * this step's `fromStage` during the window went on to `toStage`, i.e.
+ * `count / previousCount`. That is the plain reading of PRD 7.8 item 5 («доля
+ * сделок, перешедших между соседними этапами»).
+ *
+ * It is NULLABLE, and that is the honest part. The first pair has no preceding
+ * transition to divide by, and a later pair can find its predecessor at zero
+ * inside the window — deals that entered that stage BEFORE the period then
+ * advanced during it. Reporting either case as "0%" would state a conversion
+ * failure that did not happen, so the absence of a denominator is transmitted as
+ * absence rather than as a number.
+ *
+ * A share above 1 is legal for the same reason a null one is: a period can
+ * clear a backlog that accumulated before it, so more deals leave a stage than
+ * entered it during the window. Clamping that to 1 would hide real throughput,
+ * so only the lower bound is fixed.
  */
 export const dashboardFunnelStepSchema = z
   .object({
     fromStage: dealStageSchema,
     toStage: dealStageSchema,
     count: z.number().int().nonnegative(),
-    share: z.number().min(0).max(1),
+    share: z.number().min(0).nullable(),
   })
   .strict()
 

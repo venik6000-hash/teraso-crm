@@ -13,9 +13,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Toggle } from '@/components/ui/toggle'
 import { Typography } from '@/components/typography'
-import { formatDateTime } from '@/features/crm'
-import { NOTIFICATION_KIND_LABELS } from '../model'
+import { formatKyivDateTime } from '@/platform/kyiv-time'
+import { NOTIFICATION_KIND_LABELS, unreadIdsToMark } from '../model'
 
 /**
  * The notification centre (PRD 7.7).
@@ -27,6 +28,12 @@ import { NOTIFICATION_KIND_LABELS } from '../model'
  * plumbing that reads FAILED for the moment between the dispatcher claiming a
  * row and the send succeeding, so surfacing it would report a delivered
  * notification as failed — and the owner has no action to take either way.
+ *
+ * Marking read is bounded by the PAGE, not by the contract's 200-id batch cap,
+ * so a busy week leaves more unread than one request can clear. That is stated
+ * rather than hidden: the button says how many remain and stays available, and
+ * the caller narrows the list to unread so each press works through the backlog
+ * instead of re-marking the same newest page for ever.
  */
 
 const iconByKind: Record<NotificationKind, Parameters<typeof HugeiconsIcon>[0]['icon']> = {
@@ -42,20 +49,38 @@ const isUrgentKind = (kind: NotificationKind) =>
 
 export function NotificationInbox({
   error = null,
+  hasNext = false,
   isError = false,
+  isMarking = false,
   isPending = false,
+  markError = null,
   notifications,
+  onMarkRead,
+  onNextPage,
   onOpen,
+  onPreviousPage,
   onRetry,
+  onToggleUnreadOnly,
+  page = 1,
   unreadCount,
+  unreadOnly = false,
 }: {
   error?: Error | null
+  hasNext?: boolean
   isError?: boolean
+  isMarking?: boolean
   isPending?: boolean
+  markError?: string | null
   notifications: ReadonlyArray<NotificationDto>
+  onMarkRead?: () => void
+  onNextPage?: () => void
   onOpen?: () => void
+  onPreviousPage?: () => void
   onRetry?: () => void
+  onToggleUnreadOnly?: (unreadOnly: boolean) => void
+  page?: number
   unreadCount: number
+  unreadOnly?: boolean
 }) {
   if (isPending) {
     return (
@@ -82,31 +107,110 @@ export function NotificationInbox({
     )
   }
 
-  if (notifications.length === 0) {
-    return (
-      <Empty>
-        <EmptyHeader>
-          <EmptyTitle>Уведомлений пока нет</EmptyTitle>
-          <EmptyDescription>
-            Здесь появятся новые заявки, наступившие и просроченные задачи.
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    )
-  }
+  // How many this press can actually clear, so the control never promises more
+  // than the single request behind it will do.
+  const markableNow = unreadIdsToMark(notifications).length
+  const remainingAfterMark = Math.max(0, unreadCount - markableNow)
 
   return (
-    <div className="grid gap-2">
-      <Typography tone="muted" variant="caption">
-        {unreadCount > 0 ? `Непрочитанных: ${unreadCount}` : 'Все уведомления прочитаны'}
-      </Typography>
-      <ul className="grid gap-2">
-        {notifications.map((entry) => (
-          <li key={entry.id}>
-            <NotificationRow notification={entry} onOpen={onOpen} />
-          </li>
-        ))}
-      </ul>
+    <div className="grid gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Typography tone="muted" variant="caption">
+          {unreadCount > 0 ? `Непрочитанных: ${unreadCount}` : 'Все уведомления прочитаны'}
+        </Typography>
+        <div className="flex flex-wrap items-center gap-2">
+          {onToggleUnreadOnly && (
+            <Toggle
+              aria-label="Показывать только непрочитанные"
+              onPressedChange={onToggleUnreadOnly}
+              pressed={unreadOnly}
+              variant="outline"
+            >
+              <Typography variant="controlXs">Только непрочитанные</Typography>
+            </Toggle>
+          )}
+          {onMarkRead && markableNow > 0 && (
+            <Button
+              disabled={isMarking}
+              onClick={onMarkRead}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Typography variant="control">
+                {isMarking ? 'Отмечаем…' : 'Отметить прочитанными'}
+              </Typography>
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/*
+        A failed mark-read used to be invisible. That request shares one rate
+        bucket with every CRM write, so the 429 that batching exists to avoid
+        was precisely the failure nobody could see.
+      */}
+      {markError && (
+        <Alert variant="destructive">
+          <AlertTitle>Не удалось отметить прочитанными</AlertTitle>
+          <AlertDescription>{markError}</AlertDescription>
+        </Alert>
+      )}
+
+      {onMarkRead && markableNow > 0 && remainingAfterMark > 0 && (
+        <Typography tone="muted" variant="caption">
+          {`За раз отмечается ${markableNow}, останется ещё ${remainingAfterMark} — нажмите повторно.`}
+        </Typography>
+      )}
+
+      {notifications.length === 0 ? (
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>
+              {unreadOnly ? 'Непрочитанных уведомлений нет' : 'Уведомлений пока нет'}
+            </EmptyTitle>
+            <EmptyDescription>
+              {unreadOnly
+                ? 'Всё прочитано. Снимите фильтр, чтобы посмотреть историю.'
+                : 'Здесь появятся новые заявки, наступившие и просроченные задачи.'}
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <ul className="grid gap-2">
+          {notifications.map((entry) => (
+            <li key={entry.id}>
+              <NotificationRow notification={entry} onOpen={onOpen} />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {(onNextPage || onPreviousPage) && (page > 1 || hasNext) && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button
+            disabled={page <= 1}
+            onClick={onPreviousPage}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Typography variant="control">Назад</Typography>
+          </Button>
+          <Typography tone="muted" variant="caption">
+            {`Страница ${page}`}
+          </Typography>
+          <Button
+            disabled={!hasNext}
+            onClick={onNextPage}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Typography variant="control">Дальше</Typography>
+          </Button>
+        </div>
+      )}
     </div>
   )
 }
@@ -159,7 +263,7 @@ function NotificationRow({
           {notification.body}
         </Typography>
         <Typography tone="muted" variant="caption">
-          {formatDateTime(notification.createdAt)}
+          {formatKyivDateTime(notification.createdAt)}
         </Typography>
       </div>
     </Link>
