@@ -14,6 +14,7 @@ import { errorResponse, handleError, validationErrorHook } from './http/errors'
 import { createAuthSecurity } from './http/security'
 import { createAuthModule, type AuthHttpEnv } from './modules/auth'
 import { createCrmModule } from './modules/crm'
+import { createNotificationsModule } from './modules/notifications'
 import { createUsersModule } from './modules/users'
 
 type CreateAppOptions = {
@@ -35,8 +36,30 @@ export function createApp({
     requireAdmin: auth.requireAdmin,
     requireAuth: auth.requireAuth,
   })
+  /**
+   * Built BEFORE the CRM module, which receives its announcement port. The
+   * notifications context reads CRM facts; the CRM context is handed a port and
+   * imports nothing back, so this one line is the whole seam between them.
+   *
+   * The VAPID pair is validated as a group in env.ts, so the presence of the
+   * public key is enough to know the private half is there too. The private key
+   * goes no further than the delivery adapter (PRD 10).
+   */
+  const notifications = createNotificationsModule({
+    backgroundTasks,
+    db: prisma,
+    requireAuth: auth.requireAuth,
+    vapid: env.VAPID_PUBLIC_KEY
+      ? {
+          subject: env.VAPID_SUBJECT!,
+          publicKey: env.VAPID_PUBLIC_KEY,
+          privateKey: env.VAPID_PRIVATE_KEY!,
+        }
+      : undefined,
+  })
   const crm = createCrmModule({
     db: prisma,
+    notifier: notifications.leadNotifier,
     requireAuth: auth.requireAuth,
     // The signing secret is server-only (PRD 10); the two limits fall back to their
     // documented defaults when the optional env vars are unset.
@@ -97,6 +120,10 @@ export function createApp({
     app.use('/api/crm/tasks', middleware)
     app.use('/api/crm/tasks/*', middleware)
     app.use('/api/crm/clients/*', middleware)
+    // The whole notification surface is bearer-authenticated, so unlike the CRM
+    // prefixes above it needs no carve-out for an unauthenticated sibling.
+    app.use('/api/notifications', middleware)
+    app.use('/api/notifications/*', middleware)
   }
   app.get('/', (c) => {
     return c.json({
@@ -136,6 +163,7 @@ export function createApp({
   // never collide.
   app.route('/api/crm/inbound', crm.inboundRoutes)
   app.route('/api/crm', crm.routes)
+  app.route('/api/notifications', notifications.routes)
 
   app.doc('/openapi.json', {
     openapi: '3.0.0',

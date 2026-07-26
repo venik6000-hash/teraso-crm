@@ -1,3 +1,4 @@
+import { createNotificationService } from './modules/notifications'
 import { createBackendRuntime, type BackendRuntime } from './runtime'
 
 type CronTask = (runtime: BackendRuntime, now: Date) => Promise<void>
@@ -34,6 +35,33 @@ const cronTasks = {
     ])
     console.log(
       `Cron auth:sessions:cleanup removed ${sessions.count} stale sessions and ${resetTokens.count} expired password reset tokens.`,
+    )
+  },
+  /**
+   * The recurring half of PRD 7.7: announce every task that has come due, every
+   * task still unfinished past its escalation delay, and every lead that has spent
+   * its next-step window without a task — then make one best-effort push pass.
+   *
+   * It is safe to run as often as the scheduler allows. It never changes a deal's
+   * business state, and every record it writes is keyed on the instant its
+   * condition began, so a repeat run — or a slow run overlapping the next one —
+   * writes the same keys and the unique index collapses them.
+   */
+  'crm:notifications:dispatch': async ({ backgroundTasks, env, prisma }, now) => {
+    const notifications = createNotificationService({
+      backgroundTasks,
+      db: prisma,
+      vapid: env.VAPID_PUBLIC_KEY
+        ? {
+            subject: env.VAPID_SUBJECT!,
+            publicKey: env.VAPID_PUBLIC_KEY,
+            privateKey: env.VAPID_PRIVATE_KEY!,
+          }
+        : undefined,
+    })
+    const summary = await notifications.dispatchDueEvents(now)
+    console.log(
+      `Cron crm:notifications:dispatch created ${summary.created} notifications and pushed ${summary.delivered}.`,
     )
   },
 } satisfies Record<string, CronTask>

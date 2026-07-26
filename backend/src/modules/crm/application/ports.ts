@@ -114,3 +114,31 @@ export type InboundQuizLeadCommand = {
 export type Clock = {
   now(): Date
 }
+
+/**
+ * The notifications context, seen from here (PRD 7.7).
+ *
+ * It is declared as this module's own port rather than imported from the
+ * notifications module, so the dependency runs one way only: notifications reads
+ * CRM facts, CRM is handed an implementation at composition time and never
+ * imports back. It carries the committed identifiers and the two display values
+ * the announcement needs — deliberately not the inbound payload, whose UTM and
+ * click identifiers stay inside attribution (see InboundQuizLeadResult).
+ *
+ * The default implementation does nothing, so a CRM assembled without
+ * notifications behaves exactly as it did before they existed.
+ */
+export type NewLeadFact = {
+  dealId: string
+  clientId: string
+  clientName: string
+  source: string
+}
+
+export type LeadNotifier = {
+  newLeadRecorded(fact: NewLeadFact): Promise<void>
+}
+
+export const silentLeadNotifier: LeadNotifier = {
+  async newLeadRecorded() {},
+}

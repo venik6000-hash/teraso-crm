@@ -8,6 +8,7 @@ import type {
   DealListPage,
   DealTaskDto,
   InboundQuizLeadInput,
+  InboundQuizLeadResult,
 } from '@teraso-crm/contracts'
 
 import type { AuthenticatedPrincipal } from '../../auth'
@@ -19,6 +20,8 @@ import type {
   DealStageChangeCommand,
   DealUpdateCommand,
   InboundQuizLeadCommand,
+  LeadNotifier,
+  NewLeadFact,
   NoteCommand,
 } from './ports'
 
@@ -102,9 +105,12 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
   return { calls, repository }
 }
 
-function createService(overrides: Partial<CrmRepository> = {}) {
+function createService(overrides: Partial<CrmRepository> = {}, notifier?: LeadNotifier) {
   const { calls, repository } = createRepository(overrides)
-  return { calls, service: new CrmService({ repository, clock: { now: () => now } }) }
+  return {
+    calls,
+    service: new CrmService({ repository, clock: { now: () => now }, notifier }),
+  }
 }
 
 describe('phone identity', () => {
@@ -293,6 +299,111 @@ describe('missing records', () => {
       client: null,
       openDeal: null,
     })
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * Announcing a committed lead (PRD 6.1, PRD 7.7)
+ * ------------------------------------------------------------------ */
+
+describe('new lead announcements', () => {
+  const inbound: InboundQuizLeadInput = {
+    externalId: 'quiz-1',
+    source: 'teraso.com.ua',
+    receivedAt: '2026-07-23T09:59:00.000Z',
+    name: 'Олександр',
+    phone: '+380935335353',
+    form: 'Квіз',
+    landingUrl: 'https://teraso.com.ua/quiz',
+  }
+
+  function createAnnouncingService(status: InboundQuizLeadResult['status']) {
+    const announced: NewLeadFact[] = []
+    const { service } = createService(
+      {
+        recordInboundQuizLead: async () => ({
+          status,
+          clientId: '00000000-0000-7000-8000-0000000000c1',
+          dealId: '00000000-0000-7000-8000-0000000000d1',
+        }),
+      },
+      { async newLeadRecorded(fact) { announced.push(fact) } },
+    )
+    return { announced, service }
+  }
+
+  /**
+   * The status, not the HTTP code, decides. Both `attached-to-open-deal` and the
+   * two genuinely-new statuses answer 201, so branching on the response code
+   * would announce a "new lead" for a deal that already existed and was merely
+   * appended to.
+   */
+  test('announces exactly the two statuses that really created a lead', async () => {
+    for (const status of ['created', 'new-deal-for-existing-client'] as const) {
+      const { announced, service } = createAnnouncingService(status)
+      await service.recordInboundQuizLead(inbound)
+
+      expect(announced).toEqual([
+        {
+          dealId: '00000000-0000-7000-8000-0000000000d1',
+          clientId: '00000000-0000-7000-8000-0000000000c1',
+          clientName: 'Олександр',
+          source: 'teraso.com.ua',
+        },
+      ])
+    }
+  })
+
+  test('stays silent for a redelivery and for a submission on an existing open deal', async () => {
+    for (const status of ['duplicate-delivery', 'attached-to-open-deal'] as const) {
+      const { announced, service } = createAnnouncingService(status)
+      await service.recordInboundQuizLead(inbound)
+
+      expect(`${status} -> ${announced.length}`).toBe(`${status} -> 0`)
+    }
+  })
+
+  /**
+   * The lead is already committed by the time the announcement runs, so a broken
+   * notification path must not turn a stored lead into a 500 the site will retry
+   * forever. The recurring dispatcher still catches the deal 30 minutes later.
+   */
+  test('still reports the stored lead when the announcement itself fails', async () => {
+    const { service } = createService(
+      {
+        recordInboundQuizLead: async () => ({
+          status: 'created',
+          clientId: '00000000-0000-7000-8000-0000000000c1',
+          dealId: '00000000-0000-7000-8000-0000000000d1',
+        }),
+      },
+      {
+        async newLeadRecorded() {
+          throw new Error('notification store is unavailable')
+        },
+      },
+    )
+
+    expect(await service.recordInboundQuizLead(inbound)).toEqual({
+      status: 'created',
+      clientId: '00000000-0000-7000-8000-0000000000c1',
+      dealId: '00000000-0000-7000-8000-0000000000d1',
+    })
+  })
+
+  test('never announces a lead the repository refused to record', async () => {
+    const announced: NewLeadFact[] = []
+    const { service } = createService(
+      {
+        recordInboundQuizLead: async () => {
+          throw new CrmFailure('validation', 'Недопустимое время получения заявки')
+        },
+      },
+      { async newLeadRecorded(fact) { announced.push(fact) } },
+    )
+
+    await expect(service.recordInboundQuizLead(inbound)).rejects.toBeInstanceOf(CrmFailure)
+    expect(announced).toHaveLength(0)
   })
 })
 

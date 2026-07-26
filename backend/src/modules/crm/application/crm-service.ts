@@ -19,12 +19,28 @@ import type {
 import type { AuthenticatedPrincipal } from '../../auth'
 import { CrmFailure } from '../domain/errors'
 import { normalizeUaPhone } from '../domain/phone'
-import type { Clock, CrmRepository } from './ports'
+import { silentLeadNotifier, type Clock, type CrmRepository, type LeadNotifier } from './ports'
 
 type CrmServiceDependencies = {
   clock: Clock
+  /** Absent means nothing is announced; see `LeadNotifier`. */
+  notifier?: LeadNotifier
   repository: CrmRepository
 }
+
+/**
+ * The inbound statuses that are genuinely a NEW lead worth announcing (PRD 7.7).
+ *
+ * This branches on the STATUS and never on the HTTP code, because three of the
+ * four statuses answer 201: `attached-to-open-deal` also wrote a receipt, so a
+ * code-based rule would announce a "new lead" for a deal that already existed and
+ * merely received another submission. `duplicate-delivery` persisted nothing at
+ * all and would announce the same lead twice.
+ */
+const ANNOUNCEABLE_INBOUND_STATUSES = new Set<InboundQuizLeadResult['status']>([
+  'created',
+  'new-deal-for-existing-client',
+])
 
 /**
  * Sanity bounds for an inbound lead's own `receivedAt`, which is signed but — unlike
@@ -189,12 +205,40 @@ export class CrmService {
       throw new CrmFailure('validation', 'Не указан внешний идентификатор заявки')
     }
 
-    return this.dependencies.repository.recordInboundQuizLead({
+    const result = await this.dependencies.repository.recordInboundQuizLead({
       input,
       phoneNormalized: normalizeUaPhone(input.phone),
       receivedAt,
       now,
     })
+
+    await this.announceNewLead(result, input)
+    return result
+  }
+
+  /**
+   * Announces the lead AFTER the repository transaction has committed — never
+   * inside it. A notification for a deal that then rolled back would point at
+   * something the CRM does not have, which is worse than a missed alert.
+   *
+   * A failure here is swallowed on purpose: the lead is already stored, so
+   * turning a broken notification path into a 500 would make the site retry a
+   * delivery that succeeded, and the recurring dispatcher of PRD 7.7 still
+   * surfaces the deal once its next-step window closes.
+   */
+  private async announceNewLead(result: InboundQuizLeadResult, input: InboundQuizLeadInput) {
+    if (!ANNOUNCEABLE_INBOUND_STATUSES.has(result.status)) return
+
+    try {
+      await (this.dependencies.notifier ?? silentLeadNotifier).newLeadRecorded({
+        dealId: result.dealId,
+        clientId: result.clientId,
+        clientName: input.name,
+        source: input.source,
+      })
+    } catch (error) {
+      console.error('[crm] failed to announce a new inbound lead', error)
+    }
   }
 
   private now(): Date {

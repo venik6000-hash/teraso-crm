@@ -76,6 +76,10 @@ Auth and authenticated account-management writes are protected by `AUTH_BODY_LIM
 
 `REFRESH_TOKEN_TTL_DAYS` is the sliding credential lifetime, while `SESSION_ABSOLUTE_TTL_DAYS` limits the total logical session lifetime. `REFRESH_REUSE_GRACE_SECONDS` tolerates a short concurrent refresh race; replaying the immediately previous credential after that window revokes the logical session. Keep the grace window short (the default is 10 seconds). Run `auth:sessions:cleanup` on a schedule to delete revoked, sliding-expired, and absolute-expired session rows after `SESSION_RETENTION_DAYS` and remove expired password-reset tokens.
 
+Browser push env is optional and is validated as one group. Generate a pair once with `cd backend && bunx web-push generate-vapid-keys`, then set `VAPID_SUBJECT`, `VAPID_PUBLIC_KEY`, and `VAPID_PRIVATE_KEY` together; a partial or malformed group fails at boot rather than at the first send. All three are server-only. The public key is served exclusively by the authenticated `GET /api/notifications/vapid-public-key`, and the private key never leaves the delivery adapter. Leaving the group blank is supported: the CRM still writes every notification and serves the in-app centre, which is the source of truth when a browser refuses push, and each send is recorded as `SKIPPED`.
+
+Run `crm:notifications:dispatch` on a schedule to announce due tasks, tasks still unfinished past their escalation delay, and leads that spent their next-step window without a task. It writes only notification rows — never a deal, task, or activity — and every record is keyed on the instant its condition began, so repeated and overlapping runs collapse against the `[recipient_user_id, event_key]` unique index. Run it as often as the scheduler allows; note that DigitalOcean App Platform scheduled jobs support a minimum cadence of 15 minutes, so a per-minute cadence needs a scheduler that permits it. Each run looks back 24 hours, so a backlog after an outage is still delivered while older history is left to the critical-tasks list.
+
 DigitalOcean Spaces env is optional. Leave `SPACES_*` blank until the product needs uploads, media, exports, or downloads. When storage is active, configure the complete Spaces group in `backend/.env` and follow [../docs/STORAGE.md](../docs/STORAGE.md).
 
 ## Runtime Entrypoints
@@ -84,7 +88,7 @@ The backend is one workspace with one Prisma schema and one Dockerfile, but it h
 
 - API: `bun run start:api`, backed by `src/index.ts`.
 - Worker: `bun run start:worker`, backed by `src/worker.ts`. It is intentionally empty until a real long-running background handler is added, and deployment generation refuses to deploy this placeholder command as an App Platform worker.
-- Cron: `bun run start:cron -- <task>`, backed by `src/cron.ts`. Available tasks are `noop`, `db:ping`, and `auth:sessions:cleanup`.
+- Cron: `bun run start:cron -- <task>`, backed by `src/cron.ts`. Available tasks are `noop`, `db:ping`, `auth:sessions:cleanup`, and `crm:notifications:dispatch`.
 
 All entrypoints use `src/runtime.ts` for env loading, Prisma creation, and cleanup, so backend services can be shared without duplicating Prisma schema or database setup.
 

@@ -277,4 +277,56 @@ describe('loadEnv', () => {
       }),
     ).not.toThrow()
   })
+
+  /**
+   * Browser push is optional — an unset group is the correct setting until the PWA
+   * is wired up, and the in-app centre is the source of truth without it (PRD 7.7).
+   * A HALF-configured or malformed pair, though, is always a mistake, and one that
+   * would otherwise only surface as every push silently failing to sign in
+   * production, so it has to stop the process at boot.
+   */
+  test('accepts an absent VAPID group but refuses a partial or malformed one', () => {
+    const baseEnv = {
+      DATABASE_URL: 'postgresql://superuser:superpassword@localhost:54329/teraso_crm',
+      JWT_SECRET: '12345678901234567890123456789012',
+    }
+    const vapid = {
+      VAPID_SUBJECT: 'mailto:crm@teraso.com.ua',
+      VAPID_PUBLIC_KEY:
+        'BOl_yWecy7dd7cqwIR8tarfNq2VkxRE02mfa-NEaqCLA81r8GivBYWAZpmG_zKM6rJFc7vMpSHM9JGIjWEI11GA',
+      VAPID_PRIVATE_KEY: 'BUCJiIHPD65Vc69ARTp7LVfMFgnheEm-JEGN5n46Vxw',
+    }
+
+    const unset = loadEnv(baseEnv)
+    expect(unset.VAPID_PUBLIC_KEY).toBeUndefined()
+    expect(unset.VAPID_PRIVATE_KEY).toBeUndefined()
+
+    const configured = loadEnv({ ...baseEnv, ...vapid })
+    expect(configured.VAPID_PUBLIC_KEY).toBe(vapid.VAPID_PUBLIC_KEY)
+
+    for (const missing of ['VAPID_SUBJECT', 'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY'] as const) {
+      expect(() => loadEnv({ ...baseEnv, ...vapid, [missing]: '' })).toThrow(missing)
+    }
+
+    // The pair pasted in the wrong order: each key fails its own length check.
+    expect(() =>
+      loadEnv({
+        ...baseEnv,
+        ...vapid,
+        VAPID_PUBLIC_KEY: vapid.VAPID_PRIVATE_KEY,
+        VAPID_PRIVATE_KEY: vapid.VAPID_PUBLIC_KEY,
+      }),
+    ).toThrow('VAPID_PUBLIC_KEY')
+
+    expect(() => loadEnv({ ...baseEnv, ...vapid, VAPID_PUBLIC_KEY: `${vapid.VAPID_PUBLIC_KEY}=` }))
+      .toThrow('VAPID_PUBLIC_KEY')
+    expect(() => loadEnv({ ...baseEnv, ...vapid, VAPID_PRIVATE_KEY: 'short' }))
+      .toThrow('VAPID_PRIVATE_KEY')
+    expect(() => loadEnv({ ...baseEnv, ...vapid, VAPID_SUBJECT: 'crm@teraso.com.ua' }))
+      .toThrow('VAPID_SUBJECT')
+    expect(() => loadEnv({ ...baseEnv, ...vapid, VAPID_SUBJECT: 'http://teraso.com.ua' }))
+      .toThrow('VAPID_SUBJECT')
+    expect(() => loadEnv({ ...baseEnv, ...vapid, VAPID_SUBJECT: 'https://teraso.com.ua' }))
+      .not.toThrow()
+  })
 })

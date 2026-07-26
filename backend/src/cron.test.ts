@@ -14,6 +14,20 @@ describe('runCronTask', () => {
     await expect(runCronTask('missing', runtime)).rejects.toThrow('Unknown cron task')
   })
 
+  /**
+   * The scheduled job is named in a DigitalOcean spec (DO_BACKEND_CRON_TASK), not
+   * called from application code, so nothing else would notice a rename. The
+   * unknown-task error lists every registered name, which makes it the one place
+   * that proves the notification dispatcher is still reachable by its spec name.
+   * Its behaviour is covered against a real database in
+   * modules/notifications/notifications.integration.test.ts.
+   */
+  test('registers the CRM notification dispatcher under its scheduled name', async () => {
+    const error = await runCronTask('missing', runtime).catch((caught: unknown) => caught)
+
+    expect((error as Error).message).toContain('crm:notifications:dispatch')
+  })
+
   test('deletes expired and revoked auth sessions after the retention window', async () => {
     const sessionCalls: unknown[] = []
     const resetTokenCalls: unknown[] = []

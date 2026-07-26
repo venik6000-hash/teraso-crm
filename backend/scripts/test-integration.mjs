@@ -77,6 +77,7 @@ run(
     'src/modules/users/users.integration.test.ts',
     'src/modules/crm/crm.integration.test.ts',
     'src/modules/crm/transport/inbound-routes.test.ts',
+    'src/modules/notifications/notifications.integration.test.ts',
   ],
   { env },
 )

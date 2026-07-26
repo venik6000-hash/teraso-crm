@@ -110,6 +110,15 @@ const envSchema = z.object({
   TERASO_WEBHOOK_SECRET: optionalSecretSchema('TERASO_WEBHOOK_SECRET', TERASO_WEBHOOK_SECRET_MIN_LENGTH),
   TERASO_WEBHOOK_MAX_AGE_SECONDS: z.coerce.number().int().positive().max(3600).optional(),
   TERASO_WEBHOOK_BODY_LIMIT_BYTES: z.coerce.number().int().positive().max(1024 * 1024).optional(),
+  // Browser push (Task 6, PRD 7.7 and 10). All three are server-only; only the
+  // PUBLIC key is ever served to a browser, through GET
+  // /api/notifications/vapid-public-key. Leaving the group unset is a supported
+  // deployment: the in-app notification centre remains the source of truth and
+  // every send is recorded as SKIPPED. See validateVapidKeys for the all-or-nothing
+  // rule and the key-shape checks.
+  VAPID_SUBJECT: optionalStringSchema,
+  VAPID_PUBLIC_KEY: optionalStringSchema,
+  VAPID_PRIVATE_KEY: optionalStringSchema,
   SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().positive().max(60).default(20),
   TRUST_PROXY: booleanStringSchema,
   TRUSTED_PROXY_CLIENT_IP_HEADER: optionalHttpHeaderNameSchema,
@@ -134,6 +143,7 @@ const envSchema = z.object({
   validateSessionTtls(env, ctx)
   validateTrustedProxy(env, ctx)
   validateStorageEnv(env, ctx)
+  validateVapidKeys(env, ctx)
 })
 
 export type AppEnv = z.infer<typeof envSchema>
@@ -328,6 +338,74 @@ function validateCorsOrigins(env: z.infer<typeof envSchema>, ctx: z.RefinementCt
       })
     }
   }
+}
+
+/**
+ * VAPID is a P-256 key pair, so both halves have an invariant size: 65 bytes of
+ * public key and 32 bytes of private key, URL-safe base64 without padding. Pinning
+ * those lengths turns the two mistakes that actually happen — pasting the pair in
+ * the wrong order, or truncating a key when copying it out of a terminal — into a
+ * boot failure with a clear message, instead of every push silently failing to
+ * sign long after deployment.
+ *
+ * The group is all-or-nothing, like the Spaces block: a half-configured pair is
+ * always a mistake, whereas an entirely unset one is the correct setting until the
+ * PWA of Task 8 is wired up (the inbox is the source of truth without it).
+ *
+ * Generate a pair with `bunx web-push generate-vapid-keys` and store both halves as
+ * secrets; the private key must never be exposed to a browser (PRD 10).
+ */
+function validateVapidKeys(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
+  const keys = ['VAPID_SUBJECT', 'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY'] as const
+  if (keys.every((key) => env[key] === undefined)) return
+
+  for (const key of keys) {
+    if (env[key] === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [key],
+        message: `${key} is required when browser push notifications are configured`,
+      })
+    }
+  }
+
+  if (env.VAPID_SUBJECT !== undefined && !isVapidSubject(env.VAPID_SUBJECT)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['VAPID_SUBJECT'],
+      message: 'VAPID_SUBJECT must be a mailto: address or an https URL identifying the sender',
+    })
+  }
+
+  if (env.VAPID_PUBLIC_KEY !== undefined && !isBase64UrlKey(env.VAPID_PUBLIC_KEY, 65)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['VAPID_PUBLIC_KEY'],
+      message: 'VAPID_PUBLIC_KEY must be the URL-safe base64 P-256 public key from `web-push generate-vapid-keys`',
+    })
+  }
+
+  if (env.VAPID_PRIVATE_KEY !== undefined && !isBase64UrlKey(env.VAPID_PRIVATE_KEY, 32)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['VAPID_PRIVATE_KEY'],
+      message: 'VAPID_PRIVATE_KEY must be the URL-safe base64 P-256 private key from `web-push generate-vapid-keys`',
+    })
+  }
+}
+
+function isVapidSubject(subject: string) {
+  if (subject.startsWith('mailto:')) return subject.length > 'mailto:'.length
+  try {
+    return new URL(subject).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/** URL-safe base64, unpadded, decoding to exactly `byteLength` bytes. */
+function isBase64UrlKey(value: string, byteLength: number) {
+  return /^[A-Za-z0-9_-]+$/.test(value) && value.length === Math.ceil((byteLength * 4) / 3)
 }
 
 function validateStorageEnv(env: z.infer<typeof envSchema>, ctx: z.RefinementCtx) {
