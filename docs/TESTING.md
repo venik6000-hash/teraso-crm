@@ -77,7 +77,7 @@ The webapp E2E flow:
 - starts the backend on `E2E_BACKEND_PORT`, which defaults to a repository-derived port;
 - starts Vite on `E2E_WEB_PORT`, which defaults to a repository-derived port;
 - stops its `postgres_test` compose project and removes the test volume after the run unless `E2E_KEEP_DOCKER=1` is set;
-- runs the user path: validation -> register -> `/app` sidebar -> refresh -> profile persistence -> logout/login safe return;
+- runs the user path: login validation -> `create:account` + sign-in -> `/app` sidebar -> refresh -> profile persistence -> logout/login safe return;
 - runs the administrator path: seeded login -> `/admin` sidebar -> cross-role redirects -> search/promotion -> target session revocation -> admin login;
 - restores one logical browser session concurrently in two tabs, propagates confirmed logout and bootstrap-error recovery, and converges both tabs on the winning session after competing account changes;
 - runs the CRM journey described below.

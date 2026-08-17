@@ -8,7 +8,6 @@ import {
   passwordResetConfirmRequestSchema,
   passwordResetRequestResponseSchema,
   passwordResetRequestSchema,
-  registerRequestSchema,
   type CookieAuthResponse,
   type CookieRefreshResponse,
   type LoginRequest,
@@ -16,7 +15,6 @@ import {
   type PasswordResetConfirmRequest,
   type PasswordResetRequest,
   type PasswordResetRequestResponse,
-  type RegisterRequest,
 } from '@teraso-crm/contracts'
 import type { z } from 'zod'
 import { ApiRequestError, HttpClient, type HttpRequestOptions } from '@/platform/api'
@@ -59,18 +57,6 @@ export class AuthApi {
     this.http = http
     this.authCoordinator = options.authCoordinator ?? coordinateBrowserAuthMutation
     this.sessionEpoch = currentBrowserSessionEpoch()
-  }
-
-  register(input: RegisterRequest): Promise<BrowserSessionTransition<CookieAuthResponse>> {
-    const payload = registerRequestSchema.parse(input)
-    return this.authCoordinator(async () => {
-      const data = await this.http.request('/api/auth/register', cookieAuthResponseSchema, {
-        method: 'POST',
-        body: payload,
-      })
-      const sessionEvent = publishBrowserSessionState('authenticated')
-      return { data, sessionEpoch: sessionEvent.epoch }
-    })
   }
 
   login(input: LoginRequest): Promise<BrowserSessionTransition<CookieAuthResponse>> {

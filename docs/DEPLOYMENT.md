@@ -325,7 +325,7 @@ Set `DO_AUTH_SITE_DOMAIN` to the registrable site (`example.com` in the example)
 
 - backend cookies: `HttpOnly`, `Secure`, `SameSite=None`, scoped to `/api/auth`;
 - backend CORS: exact HTTPS origins only, `credentials: true`, no wildcard fallback;
-- every cookie-based auth write (`register`, `login`, `refresh`, and `logout`): requires an `Origin` header that exactly matches `CORS_ORIGINS`;
+- every cookie-based auth write (`login`, `refresh`, and `logout`): requires an `Origin` header that exactly matches `CORS_ORIGINS`;
 - webapp API client: `credentials: include`;
 - webapp static build: concrete `VITE_API_URL` pointing at the backend origin.
 

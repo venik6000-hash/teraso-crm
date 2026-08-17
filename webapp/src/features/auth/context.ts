@@ -2,7 +2,6 @@ import type {
   LoginRequest,
   PasswordResetConfirmRequest,
   PasswordResetRequest,
-  RegisterRequest,
   UserDto,
 } from '@teraso-crm/contracts'
 import { createContext } from 'react'
@@ -15,7 +14,6 @@ export type AuthContextValue = {
   sessionError: Error | null
   retrySession: () => Promise<void>
   transport: AuthenticatedTransport
-  register: (input: RegisterRequest) => Promise<void>
   login: (input: LoginRequest) => Promise<void>
   logout: () => Promise<void>
   requestPasswordReset: (input: PasswordResetRequest) => Promise<void>

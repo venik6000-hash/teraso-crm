@@ -446,3 +446,94 @@ test('password reset confirmation rejects invalid tokens before hashing and defe
   await deferredTasks[0]!(new AbortController().signal)
   expect(changedEmails).toEqual([user.email])
 })
+
+/**
+ * Account creation deliberately has no HTTP route: Teraso CRM serves one
+ * company, so an operator creates accounts against the deployment instead of
+ * strangers signing themselves up. The rule that one address owns one account
+ * still lives here, and it has to refuse before any password hashing or session
+ * work happens — otherwise a repeated address would burn work on its way to a
+ * constraint violation, and a race could mint a second account.
+ */
+test('register refuses an address that already has an account, before doing any work', async () => {
+  let hashed = false
+  let created = false
+  const repository = {
+    findUserByEmail: async () => user,
+    createPasswordUserWithSession: async () => {
+      created = true
+      return { user, session: { id: 'session-created' } }
+    },
+  } as unknown as AuthRepository
+  const service = new AuthService({
+    ...unusedPasswordResetDependencies,
+    accessTokens: {
+      sign: async () => 'access-token',
+      verify: async () => ({ sub: user.id, email: user.email, sessionId: 'session-created' }),
+    },
+    clock: { now: () => new Date('2026-01-01T00:00:00.000Z') },
+    logoutCleanup: async () => undefined,
+    passwords: {
+      hash: async () => {
+        hashed = true
+        return 'password-hash'
+      },
+      verify: async () => true,
+    },
+    projectUser,
+    refreshReuseGraceSeconds: 10,
+    refreshTokenTtlDays: 30,
+    sessionAbsoluteTtlDays: 90,
+    refreshTokens: {
+      create: () => 'refresh-token',
+      hash: (token) => `hash:${token}`,
+      familyHash: (token) => `family:${token}`,
+      rotate: (token) => `next:${token}`,
+    },
+    repository,
+  })
+
+  await expect(
+    service.register({ displayName: undefined, email: user.email, password: 'password123' }, {}),
+  ).rejects.toThrow(/already exists/)
+  expect(hashed).toBe(false)
+  expect(created).toBe(false)
+})
+
+test('register creates the account and issues its first session', async () => {
+  const repository = {
+    findUserByEmail: async () => null,
+    createPasswordUserWithSession: async () => ({
+      user,
+      session: { id: 'session-created' },
+    }),
+  } as unknown as AuthRepository
+  const service = new AuthService({
+    ...unusedPasswordResetDependencies,
+    accessTokens: {
+      sign: async () => 'access-token',
+      verify: async () => ({ sub: user.id, email: user.email, sessionId: 'session-created' }),
+    },
+    clock: { now: () => new Date('2026-01-01T00:00:00.000Z') },
+    logoutCleanup: async () => undefined,
+    passwords: {
+      hash: async () => 'password-hash',
+      verify: async () => true,
+    },
+    projectUser,
+    refreshReuseGraceSeconds: 10,
+    refreshTokenTtlDays: 30,
+    sessionAbsoluteTtlDays: 90,
+    refreshTokens: {
+      create: () => 'refresh-token',
+      hash: (token) => `hash:${token}`,
+      familyHash: (token) => `family:${token}`,
+      rotate: (token) => `next:${token}`,
+    },
+    repository,
+  })
+
+  await expect(
+    service.register({ displayName: undefined, email: 'fresh@example.com', password: 'password123' }, {}),
+  ).resolves.toMatchObject({ accessToken: 'access-token', refreshToken: 'refresh-token' })
+})

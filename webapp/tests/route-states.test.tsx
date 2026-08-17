@@ -174,7 +174,6 @@ function authValue(role: UserRole): AuthContextValue {
     isBootstrapping: false,
     sessionError: null,
     retrySession: async () => undefined,
-    register: async () => undefined,
     login: async () => undefined,
     logout: async () => undefined,
     requestPasswordReset: async () => undefined,

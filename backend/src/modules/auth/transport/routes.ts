@@ -9,7 +9,6 @@ import {
   passwordResetConfirmRequestSchema,
   passwordResetRequestResponseSchema,
   passwordResetRequestSchema,
-  registerRequestSchema,
   tokenAuthResponseSchema,
   tokenLogoutRequestSchema,
   tokenRefreshRequestSchema,
@@ -77,56 +76,13 @@ const authWriteErrorResponses = {
   429: { content: errorResponseContent, description: 'Too many authentication requests' },
 }
 
-const cookieRegisterRoute = createRoute({
-  method: 'post',
-  path: '/register',
-  request: {
-    body: {
-      content: {
-        'application/json': {
-          schema: registerRequestSchema,
-        },
-      },
-    },
-  },
-  responses: {
-    ...authWriteErrorResponses,
-    201: {
-      content: cookieAuthResponseContent,
-      description: 'Created user and browser session',
-    },
-    400: { content: errorResponseContent, description: 'Invalid payload' },
-    403: {
-      content: errorResponseContent,
-      description: 'Cookie auth request came from an untrusted browser origin',
-    },
-    409: { content: errorResponseContent, description: 'Email already exists' },
-  },
-})
-
-const tokenRegisterRoute = createRoute({
-  method: 'post',
-  path: '/token/register',
-  request: {
-    body: {
-      content: {
-        'application/json': {
-          schema: registerRequestSchema,
-        },
-      },
-    },
-  },
-  responses: {
-    ...authWriteErrorResponses,
-    201: {
-      content: tokenAuthResponseContent,
-      description: 'Created user and explicit token session',
-    },
-    400: { content: errorResponseContent, description: 'Invalid payload' },
-    409: { content: errorResponseContent, description: 'Email already exists' },
-  },
-})
-
+/**
+ * There is deliberately no registration route here. Teraso CRM serves one
+ * company's staff, so accounts are created by an operator against the
+ * deployment, never by whoever reaches the sign-in page. The capability itself
+ * still lives in AuthService.register, which is what an operator-facing
+ * creation flow would call once it exists; only the public door is missing.
+ */
 const cookieLoginRoute = createRoute({
   method: 'post',
   path: '/login',
@@ -333,18 +289,6 @@ export function createAuthRoutes({ env, requireAuth, service }: CreateAuthRoutes
   const routes = new OpenAPIHono<AuthHttpEnv>({ defaultHook: validationErrorHook })
   const protectedRoutes = new OpenAPIHono<AuthHttpEnv>({
     defaultHook: validationErrorHook,
-  })
-
-  routes.openapi(cookieRegisterRoute, async (c) => {
-    assertTrustedCookieOrigin(c, env)
-    const result = await executeAuth(() => service.register(c.req.valid('json'), requestMetadata(c, env)))
-    setRefreshCookie(c, result.refreshToken, env)
-    return c.json(withoutRefreshToken(result), 201)
-  })
-
-  routes.openapi(tokenRegisterRoute, async (c) => {
-    const result = await executeAuth(() => service.register(c.req.valid('json'), requestMetadata(c, env)))
-    return c.json(result, 201)
   })
 
   routes.openapi(cookieLoginRoute, async (c) => {

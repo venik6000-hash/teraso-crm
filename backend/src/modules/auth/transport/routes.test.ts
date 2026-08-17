@@ -28,9 +28,30 @@ const env: AppEnv = {
 }
 
 describe('auth routes', () => {
+  /**
+   * Teraso CRM is an internal tool for one company. Nobody signs themselves up:
+   * accounts are created by an operator against the deployment. A reachable
+   * registration endpoint would let anyone who learns the address mint an
+   * account, and while such an account sees no CRM data today, it turns any
+   * future slip in role handling into a breach instead of a bug.
+   */
+  test.each([
+    ['/api/auth/register'],
+    ['/api/auth/token/register'],
+  ])('does not expose %s', async (path) => {
+    const app = createApp({ env, prisma: {} as DbClient })
+    const response = await app.request(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'stranger@example.com', password: 'correct-horse-battery' }),
+    })
+
+    expect(response.status).toBe(404)
+  })
+
   test('limits auth request bodies before validation or password work', async () => {
     const app = createApp({ env: { ...env, AUTH_BODY_LIMIT_BYTES: 32 }, prisma: {} as DbClient })
-    const response = await app.request('/api/auth/register', {
+    const response = await app.request('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'body@example.com', password: 'x'.repeat(64) }),
@@ -41,7 +62,7 @@ describe('auth routes', () => {
 
   test('rate limits repeated auth writes from one client before service work', async () => {
     const app = createApp({ env: { ...env, AUTH_RATE_LIMIT_MAX: 1 }, prisma: {} as DbClient })
-    const request = () => app.request('/api/auth/register', {
+    const request = () => app.request('/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -59,7 +80,7 @@ describe('auth routes', () => {
 
   test('uses the configured trusted proxy header instead of a shared ingress address', async () => {
     const app = createApp({ env: { ...env, AUTH_RATE_LIMIT_MAX: 1 }, prisma: {} as DbClient })
-    const request = (clientIp: string) => app.request('/api/auth/register', {
+    const request = (clientIp: string) => app.request('/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -84,7 +105,7 @@ describe('auth routes', () => {
       },
       prisma: {} as DbClient,
     })
-    const request = (clientIp: string) => app.request('/api/auth/register', {
+    const request = (clientIp: string) => app.request('/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

@@ -34,13 +34,6 @@ const loginRoute = createRoute({
   component: lazyRouteComponent(() => import('./pages'), 'LoginPage'),
 })
 
-const signupRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/signup',
-  validateSearch: returnToSearch,
-  component: lazyRouteComponent(() => import('./pages'), 'SignupPage'),
-})
-
 const forgotPasswordRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/forgot-password',
@@ -157,7 +150,6 @@ const adminSettingsRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
-  signupRoute,
   forgotPasswordRoute,
   resetPasswordRoute,
   userWorkspaceRoute.addChildren([

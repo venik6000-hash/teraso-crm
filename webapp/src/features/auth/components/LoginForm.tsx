@@ -5,7 +5,7 @@ import { useId, useState } from 'react'
 
 import { Typography } from '@/components/typography'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { ApiRequestError } from '@/platform/api'
 import { useAuth } from '../use-auth'
@@ -13,7 +13,7 @@ import { FormAlert } from './form-errors'
 import type { FieldErrors } from './form-model'
 import { clearFieldError, errorId, hasErrors, toFieldErrors } from './form-validation'
 
-export function LoginForm({ returnTo }: { returnTo?: string }) {
+export function LoginForm() {
   const auth = useAuth()
   const emailId = useId()
   const emailErrorId = useId()
@@ -134,13 +134,6 @@ export function LoginForm({ returnTo }: { returnTo?: string }) {
             )}
           />
         </Field>
-
-        <FieldDescription className="text-center">
-          Don&apos;t have an account?{' '}
-          <Link search={{ returnTo }} to="/signup">
-            Sign up
-          </Link>
-        </FieldDescription>
       </FieldGroup>
     </form>
   )

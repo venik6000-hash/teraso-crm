@@ -10,6 +10,7 @@ import { createApp } from '../../../app'
 import { createPrisma } from '../../../db'
 import type { DbClient } from '../../../db'
 import type { AppEnv } from '../../../env'
+import { createAccount } from '../../../../scripts/create-account'
 
 /**
  * The transactional half of the site webhook: what a signed, schema-valid delivery
@@ -427,16 +428,24 @@ maybeDescribe('inbound quiz webhook ingestion', () => {
     expect(await prisma.client.count()).toBe(1)
   })
 
-  /** Registers an account and promotes it: the CRM API is administrator-only. */
+  /**
+   * Seeds an administrator and signs in: the CRM API is administrator-only, and
+   * there is no registration endpoint to go through, because accounts are
+   * created against the deployment rather than over HTTP.
+   */
   async function administratorToken(): Promise<string> {
-    const response = await app.request('/api/auth/token/register', {
+    await createAccount(prisma, {
+      email: 'owner@teraso.com.ua',
+      password: 'password123',
+      role: 'admin',
+    })
+    const response = await app.request('/api/auth/token/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'owner@teraso.com.ua', password: 'password123' }),
     })
-    expect(response.status).toBe(201)
-    const session = (await response.json()) as { accessToken: string; user: { id: string } }
-    await prisma.user.update({ where: { id: session.user.id }, data: { role: 'admin' } })
+    expect(response.status).toBe(200)
+    const session = (await response.json()) as { accessToken: string }
     return session.accessToken
   }
 })

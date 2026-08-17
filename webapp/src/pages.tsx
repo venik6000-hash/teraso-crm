@@ -14,7 +14,6 @@ import {
   clearPasswordResetTokenHash,
   ForgotPasswordForm,
   LoginForm,
-  RegisterForm,
   readPasswordResetToken,
   ResetPasswordForm,
   useAuth,
@@ -62,18 +61,7 @@ export function LoginPage() {
   return (
     <GuestAuthPage returnTo={returnTo}>
       <AuthPageShell>
-        <LoginForm returnTo={returnTo} />
-      </AuthPageShell>
-    </GuestAuthPage>
-  )
-}
-
-export function SignupPage() {
-  const { returnTo } = useSearch({ from: '/signup' })
-  return (
-    <GuestAuthPage returnTo={returnTo}>
-      <AuthPageShell>
-        <RegisterForm returnTo={returnTo} />
+        <LoginForm />
       </AuthPageShell>
     </GuestAuthPage>
   )

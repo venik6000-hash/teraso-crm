@@ -497,6 +497,42 @@ accountable, that is a separate log outside the deal's own timeline — see §12
 
 ---
 
+## 7a. Accounts
+
+There is no registration page and no registration endpoint. Teraso CRM serves one
+company, so an account is something an operator creates against a deployment, not
+something a visitor creates for themselves. `POST /api/auth/register` does not
+exist; a request to it answers `404`.
+
+Create an account by running the command inside the backend, on the machine that
+holds `DATABASE_URL`:
+
+```bash
+ACCOUNT_PASSWORD='<generated password>' bun run --cwd backend create:account -- --email=person@example.com --role=user
+```
+
+- `--role` is `user` by default and `admin` for someone who needs the CRM itself.
+  A `user` sees only their own profile and settings: every CRM screen and the
+  account console answer `403` (§13).
+- Pass the password through `ACCOUNT_PASSWORD`, not `--password`. An argument is
+  visible in the process list and in shell history to anyone else on the machine.
+- Omit the password entirely to create a **locked** account: it exists and can be
+  given a role, but nothing will authenticate it until a password is set. That is
+  the safe way to prepare an account ahead of time.
+- The command refuses an address that already has an account rather than creating
+  a second one or overwriting the first.
+
+Generate the password rather than inventing one, and hand it over through a
+password manager:
+
+```bash
+openssl rand -base64 18
+```
+
+Changing an existing account's role does not need this command — an administrator
+does it in `/admin/users`. There is no screen for creating accounts; if that
+becomes a regular need, the admin area is where it belongs.
+
 ## 8. Investigating a lead the site says it sent
 
 Every accepted delivery writes an **ingestion receipt**. Look it up by the pair
@@ -699,7 +735,7 @@ recorded as follow-up work in §12.
 The API limits how many **write** requests one IP address may make per minute.
 Two independent budgets exist:
 
-- one for `/api/auth/*` — sign in, register, sign out, **and the silent token
+- one for `/api/auth/*` — sign in, sign out, **and the silent token
   refresh**. The browser holds a 15-minute access token (`ACCESS_TOKEN_TTL_SECONDS`);
   once it expires, the next thing the person does quietly fails with `401`, the
   client refreshes the token and retries. They never see it — unless the refresh
@@ -850,16 +886,6 @@ subtree so the form does not participate in the swap.
 
 The correct fix is to give the background refresh its own budget, separate from
 sign-in attempts. Until then, `AUTH_RATE_LIMIT_MAX` is the dial.
-
-### Registration is open, so accounts accumulate
-
-Anyone who can reach the deployment can create an account at `/signup`. Such an
-account is a `user`, so it can open **only** its own profile and settings — the CRM
-and the account console both refuse it in the interface and with `403` at the API
-(§13) — and it receives no notifications. **Impact: a growing list of useless
-accounts in `/admin/users`, not exposure of customer data.** There is no invite
-flow and no switch to close registration; the follow-up is to add one, and until
-then the administrator can see what has accumulated in the user directory.
 
 ### Deleting a deal leaves no trace of who deleted it (§7)
 

@@ -5,6 +5,7 @@ import { createBackgroundTasks } from '../../background-tasks'
 import { createPrisma } from '../../db'
 import type { EmailMessage } from '../../email/service'
 import type { AppEnv } from '../../env'
+import { createAccount } from '../../../scripts/create-account'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 
@@ -44,21 +45,27 @@ maybeDescribe('auth API integration', () => {
     await prisma.$disconnect()
   })
 
-  test('registers, reads me, refreshes, and logs out', async () => {
-    const register = await app.request('/api/auth/token/register', {
+  /**
+   * Accounts are created against the deployment, never over HTTP: there is no
+   * registration endpoint. Seeding the row here and signing in through the real
+   * login route keeps every session in this file one the API itself issued.
+   */
+  async function seedUser(email: string, displayName?: string) {
+    await createAccount(prisma, { displayName, email, password: 'password123', role: 'user' })
+  }
+
+  test('signs in, reads me, refreshes, and logs out', async () => {
+    await seedUser('user@example.com', 'User')
+    const register = await app.request('/api/auth/token/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        email: 'user@example.com',
-        password: 'password123',
-        displayName: 'User',
-      }),
+      body: JSON.stringify({ email: 'user@example.com', password: 'password123' }),
     })
     const registerBody = await register.json()
 
-    expect(register.status).toBe(201)
+    expect(register.status).toBe(200)
     expect(registerBody.user.email).toBe('user@example.com')
     expect(registerBody.user.role).toBe('user')
     expect(registerBody.accessToken).toBeString()
@@ -152,13 +159,11 @@ maybeDescribe('auth API integration', () => {
       env,
       prisma,
     })
-    const register = await emailApp.request('/api/auth/token/register', {
+    await seedUser('reset@example.com')
+    const register = await emailApp.request('/api/auth/token/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: 'reset@example.com',
-        password: 'password123',
-      }),
+      body: JSON.stringify({ email: 'reset@example.com', password: 'password123' }),
     })
     const registered = await register.json()
 
@@ -261,15 +266,13 @@ maybeDescribe('auth API integration', () => {
   })
 
   test('returns one durable successor across three concurrent refresh requests', async () => {
-    const register = await app.request('/api/auth/token/register', {
+    await seedUser('race@example.com')
+    const register = await app.request('/api/auth/token/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        email: 'race@example.com',
-        password: 'password123',
-      }),
+      body: JSON.stringify({ email: 'race@example.com', password: 'password123' }),
     })
     const registerBody = await register.json()
 
@@ -336,7 +339,8 @@ maybeDescribe('auth API integration', () => {
   })
 
   test('revokes a session when any older refresh credential is reused after grace', async () => {
-    const register = await app.request('/api/auth/token/register', {
+    await seedUser('reuse@example.com')
+    const register = await app.request('/api/auth/token/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'reuse@example.com', password: 'password123' }),
@@ -378,21 +382,19 @@ maybeDescribe('auth API integration', () => {
   })
 
   test('web auth never exposes its HttpOnly refresh token when the client platform header is spoofed', async () => {
-    const register = await app.request('/api/auth/register', {
+    await seedUser('web-cookie@example.com')
+    const register = await app.request('/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Client-Platform': 'mobile',
       },
-      body: JSON.stringify({
-        email: 'web-cookie@example.com',
-        password: 'password123',
-      }),
+      body: JSON.stringify({ email: 'web-cookie@example.com', password: 'password123' }),
     })
     const registerBody = await register.json()
     const setCookie = register.headers.get('set-cookie')
 
-    expect(register.status).toBe(201)
+    expect(register.status).toBe(200)
     expect(registerBody.refreshToken).toBeUndefined()
     expect(setCookie).toContain('teraso_crm_refresh=')
     expect(setCookie).toContain('HttpOnly')
@@ -443,21 +445,19 @@ maybeDescribe('auth API integration', () => {
       },
       prisma,
     })
-    const register = await productionApp.request('/api/auth/register', {
+    await seedUser('production-cookie@example.com')
+    const register = await productionApp.request('/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Origin: 'https://web.example.com',
       },
-      body: JSON.stringify({
-        email: 'production-cookie@example.com',
-        password: 'password123',
-      }),
+      body: JSON.stringify({ email: 'production-cookie@example.com', password: 'password123' }),
     })
     const registerBody = await register.json()
     const setCookie = register.headers.get('set-cookie')
 
-    expect(register.status).toBe(201)
+    expect(register.status).toBe(200)
     expect(register.headers.get('access-control-allow-origin')).toBe('https://web.example.com')
     expect(register.headers.get('access-control-allow-credentials')).toBe('true')
     expect(registerBody.refreshToken).toBeUndefined()
@@ -476,16 +476,14 @@ maybeDescribe('auth API integration', () => {
       },
       prisma,
     })
-    const register = await productionApp.request('/api/auth/register', {
+    await seedUser('csrf-cookie@example.com')
+    const register = await productionApp.request('/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Origin: 'https://web.example.com',
       },
-      body: JSON.stringify({
-        email: 'csrf-cookie@example.com',
-        password: 'password123',
-      }),
+      body: JSON.stringify({ email: 'csrf-cookie@example.com', password: 'password123' }),
     })
     const cookie = register.headers.get('set-cookie')!.split(';')[0]
 
@@ -530,7 +528,7 @@ maybeDescribe('auth API integration', () => {
     const unauthorizedMe = await app.request('/api/auth/me')
     expect(unauthorizedMe.status).toBe(401)
 
-    const invalidRegister = await app.request('/api/auth/register', {
+    const invalidRegister = await app.request('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -639,24 +637,13 @@ maybeDescribe('auth API integration', () => {
     expect(activeRefresh.status).toBe(200)
   })
 
-  test('rejects duplicate email and invalid login', async () => {
+  test('rejects a wrong password for an existing account', async () => {
     const payload = {
       email: 'dupe@example.com',
       password: 'password123',
     }
 
-    await app.request('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-
-    const duplicate = await app.request('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    expect(duplicate.status).toBe(409)
+    await seedUser(payload.email)
 
     const invalidLogin = await app.request('/api/auth/login', {
       method: 'POST',
@@ -669,38 +656,9 @@ maybeDescribe('auth API integration', () => {
     expect(invalidLogin.status).toBe(401)
   })
 
-  test('returns one created user and one conflict for concurrent duplicate registration', async () => {
-    const payload = {
-      email: 'register-race@example.com',
-      password: 'password123',
-    }
-
-    const [first, second] = await Promise.all([
-      app.request('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      }),
-      app.request('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      }),
-    ])
-
-    const statuses = [first.status, second.status].sort((left, right) => left - right)
-    expect(statuses).toEqual([201, 409])
-
-    const users = await prisma.user.count({
-      where: {
-        email: payload.email,
-      },
-    })
-    expect(users).toBe(1)
-  })
-
   async function registerForMeGuard(email: string) {
-    const register = await app.request('/api/auth/token/register', {
+    await seedUser(email)
+    const register = await app.request('/api/auth/token/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -720,7 +678,7 @@ maybeDescribe('auth API integration', () => {
       },
     })
 
-    expect(register.status).toBe(201)
+    expect(register.status).toBe(200)
     expect(registerBody.accessToken).toBeString()
 
     return {

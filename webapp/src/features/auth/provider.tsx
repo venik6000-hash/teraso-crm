@@ -3,7 +3,6 @@ import type {
   LoginRequest,
   PasswordResetConfirmRequest,
   PasswordResetRequest,
-  RegisterRequest,
 } from '@teraso-crm/contracts'
 import {
   type PropsWithChildren,
@@ -20,8 +19,7 @@ import {
   useCurrentUserQuery,
   useLoginMutation,
   useLogoutMutation,
-  useRegisterMutation,
-} from './queries'
+  } from './queries'
 import { AuthContext, type AuthContextValue } from './context'
 import { bootstrapAuthSession } from './bootstrap'
 import { subscribeToBrowserSessionChanges } from './session-coordinator'
@@ -111,16 +109,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
     api,
     enabled: !isBootstrapping && Boolean(accessToken),
   })
-  const { mutateAsync: registerAsync } = useRegisterMutation({ api, setAccessToken })
   const { mutateAsync: loginAsync } = useLoginMutation({ api, setAccessToken })
   const { mutateAsync: logoutAsync } = useLogoutMutation({ api, setAccessToken })
-
-  const register = useCallback(
-    async (input: RegisterRequest) => {
-      await registerAsync(input)
-    },
-    [registerAsync],
-  )
 
   const login = useCallback(
     async (input: LoginRequest) => {
@@ -176,13 +166,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
       sessionError,
       retrySession,
       transport,
-      register,
       login,
       logout,
       requestPasswordReset,
       confirmPasswordReset,
     }),
-    [confirmPasswordReset, isBootstrapping, login, logout, meQuery.data?.user, register, requestPasswordReset, retrySession, sessionError, transport],
+    [confirmPasswordReset, isBootstrapping, login, logout, meQuery.data?.user, requestPasswordReset, retrySession, sessionError, transport],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

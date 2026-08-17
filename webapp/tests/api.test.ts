@@ -349,15 +349,15 @@ test('AuthApi preserves backend error status, code, and message', async () => {
   globalThis.fetch = async (input) => {
     const path = new URL(String(input)).pathname
 
-    if (path === '/api/auth/register') {
+    if (path === '/api/auth/login') {
       return json(
         {
           error: {
-            code: 'CONFLICT',
-            message: 'User with this email already exists',
+            code: 'UNAUTHORIZED',
+            message: 'Invalid email or password',
           },
         },
-        409,
+        401,
       )
     }
 
@@ -370,14 +370,14 @@ test('AuthApi preserves backend error status, code, and message', async () => {
   })
 
   await expect(
-    client.register({
-      email: 'dupe@example.com',
+    client.login({
+      email: 'someone@example.com',
       password: 'password123',
     }),
   ).rejects.toMatchObject({
-    status: 409,
-    code: 'CONFLICT',
-    message: 'User with this email already exists',
+    status: 401,
+    code: 'UNAUTHORIZED',
+    message: 'Invalid email or password',
   })
 })
 

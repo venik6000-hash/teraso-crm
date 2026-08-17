@@ -8,7 +8,6 @@ import type {
   CookieAuthResponse,
   LoginRequest,
   MeResponse,
-  RegisterRequest,
 } from '@teraso-crm/contracts'
 
 import type { AuthApi } from './api'
@@ -52,7 +51,7 @@ type CurrentUserQueryOptions = {
 }
 
 type AuthMutationOptions = {
-  api: Pick<AuthApi, 'isSessionEpochCurrent' | 'login' | 'logout' | 'register'>
+  api: Pick<AuthApi, 'isSessionEpochCurrent' | 'login' | 'logout'>
   setAccessToken: (accessToken: string | null) => void
 }
 
@@ -61,18 +60,6 @@ export function useCurrentUserQuery({ api, enabled }: CurrentUserQueryOptions) {
     queryKey: authQueryKeys.me(),
     enabled,
     queryFn: () => api.me(),
-  })
-}
-
-export function useRegisterMutation({ api, setAccessToken }: AuthMutationOptions) {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: RegisterRequest) => api.register(input),
-    onSuccess: (transition) => {
-      if (!api.isSessionEpochCurrent(transition.sessionEpoch)) return
-      applyAuthenticatedSession(queryClient, setAccessToken, transition.data)
-    },
   })
 }
 

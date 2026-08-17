@@ -3,6 +3,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
 
 import { createApp } from '../../app'
 import { createPrisma, type DbClient } from '../../db'
+import { createAccount } from '../../../scripts/create-account'
 import type { AppEnv } from '../../env'
 import {
   assertLoginCapableAdmin,
@@ -637,17 +638,20 @@ maybeDescribe('users and admin API integration', () => {
     return { db, reached, release: releaseGate }
   }
 
+  /**
+   * There is no registration endpoint: accounts are created against the
+   * deployment, not over HTTP. The fixture therefore seeds the row the way an
+   * operator would and then signs in through the real login route, so every
+   * session in this file is still one the API itself issued.
+   */
   async function register(email: string, displayName?: string) {
-    const response = await app.request('/api/auth/token/register', {
+    await createAccount(prisma, { displayName, email, password: 'password123', role: 'user' })
+    const response = await app.request('/api/auth/token/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email,
-        password: 'password123',
-        displayName,
-      }),
+      body: JSON.stringify({ email, password: 'password123' }),
     })
-    expect(response.status).toBe(201)
+    expect(response.status).toBe(200)
     return response.json()
   }
 

@@ -1,48 +1,42 @@
 import type { Page } from '@playwright/test'
-import { e2ePassword, expect, test, uniqueEmail } from '../helpers/test'
+import {
+  createAccount,
+  createAccountAndSignIn,
+  e2ePassword,
+  expect,
+  signInHere,
+  test,
+  uniqueEmail,
+} from '../helpers/test'
 
-test('registers, restores the session, opens protected UI, and logs out', async ({ page }) => {
+test('signs in, restores the session, opens protected UI, and logs out', async ({ page }) => {
   const email = uniqueEmail()
   const displayName = 'Web E2E User'
 
-  await page.goto('/signup')
+  createAccount(email, { displayName })
+
+  await page.goto('/login')
 
   await expect(page.getByRole('main')).toHaveCount(1)
-  await expect(page.getByRole('heading', { level: 1, name: 'Create your account' })).toBeVisible()
-  const signupPassword = page.getByLabel('Password', { exact: true })
-  const signupPasswordDescriptions = await signupPassword.getAttribute('aria-describedby')
-  expect(signupPasswordDescriptions).toBeTruthy()
-  const [signupPasswordRequirementId] = signupPasswordDescriptions!.split(/\s+/)
-  await expect(page.locator(`[id="${signupPasswordRequirementId}"]`)).toHaveText(
-    'Must be at least 8 characters long.',
-  )
-  await page.getByRole('button', { name: 'Create Account' }).click()
+  await expect(page.getByRole('heading', { level: 1, name: 'Login to your account' })).toBeVisible()
+  // The sign-in page offers no way to create an account, because there is no way
+  // to create one from a browser: accounts are made against the deployment.
+  await expect(page.getByRole('link', { name: 'Sign up' })).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'Login' }).click()
   await expect(page.getByText('Invalid email address')).toBeVisible()
   await expect(page.getByText('Password must be at least 8 characters')).toBeVisible()
 
-  await page.getByLabel('Full Name').fill('A')
-  await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
-  await page.getByRole('link', { name: 'Sign in' }).click()
-  await expect(page.getByLabel('Full Name')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Login' })).toBeEnabled()
-
-  await page.getByRole('link', { name: 'Sign up' }).click()
-  await page.getByLabel('Full Name').fill(displayName)
-  await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
-  await page.getByRole('button', { name: 'Create Account' }).click()
+  await signInHere(page, email)
 
   await expect(page).toHaveURL(/\/app$/)
   await expect(page.getByRole('main')).toHaveCount(1)
   await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible()
   await expect(page.getByRole('heading', { level: 1, name: `Welcome, ${displayName}` })).toBeVisible()
-  // Registration is open and creates the `user` role, and the CRM product is the
+  // create:account makes a `user` by default, and the CRM product is the
   // руководитель's alone (PRD 3) — the API answers 403 to every screen behind
-  // these labels. So a freshly registered account is offered its account area and
-  // nothing else: no CRM links, and no account console either.
+  // these labels. So a plain account is offered its account area and nothing
+  // else: no CRM links, and no account console either.
   await expect(page.getByRole('link', { name: 'Настройки' })).toBeVisible()
   for (const section of ['Сделки', 'Задачи', 'Дашборд', 'Воронка', 'Уведомления']) {
     await expect(page.getByRole('link', { name: section })).toHaveCount(0)
@@ -187,11 +181,7 @@ test('shows generic forgot-password success and handles an invalid reset link', 
 
 test('allows an authenticated browser to complete a password reset and clears local auth', async ({ page }) => {
   const email = uniqueEmail('authenticated-reset')
-  await page.goto('/signup')
-  await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
-  await page.getByRole('button', { name: 'Create Account' }).click()
+  await createAccountAndSignIn(page, email)
   await expect(page).toHaveURL(/\/app$/)
 
   await page.route('**/api/auth/password-reset/confirm', async (route) => {
@@ -214,11 +204,7 @@ test('allows an authenticated browser to complete a password reset and clears lo
 test('keeps one logical browser session active across concurrent tabs', async ({ page }) => {
   const email = uniqueEmail('web-e2e-tabs')
 
-  await page.goto('/signup')
-  await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
-  await page.getByRole('button', { name: 'Create Account' }).click()
+  await createAccountAndSignIn(page, email)
   await expect(page).toHaveURL(/\/app$/)
 
   const secondPage = await page.context().newPage()
@@ -250,11 +236,7 @@ test('keeps one logical browser session active across concurrent tabs', async ({
 test('remote logout recovers a tab from a transient bootstrap error', async ({ page }) => {
   const email = uniqueEmail('web-e2e-bootstrap-logout')
 
-  await page.goto('/signup')
-  await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
-  await page.getByRole('button', { name: 'Create Account' }).click()
+  await createAccountAndSignIn(page, email)
   await expect(page).toHaveURL(/\/app$/)
 
   const healthyPage = await page.context().newPage()
@@ -281,11 +263,7 @@ test('unknown routes wait for session recovery before choosing their return dest
   page,
 }) => {
   const email = uniqueEmail('web-e2e-not-found')
-  await page.goto('/signup')
-  await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
-  await page.getByRole('button', { name: 'Create Account' }).click()
+  await createAccountAndSignIn(page, email)
   await expect(page).toHaveURL(/\/app$/)
 
   let failRefresh = true
@@ -318,17 +296,20 @@ test('concurrent account changes converge every tab on the winning cookie sessio
   const secondEmail = uniqueEmail('web-e2e-account-b')
   const secondPage = await page.context().newPage()
 
-  await Promise.all([page.goto('/signup'), secondPage.goto('/signup')])
+  createAccount(firstEmail)
+  createAccount(secondEmail)
+
+  await Promise.all([page.goto('/login'), secondPage.goto('/login')])
   await page.getByLabel('Email').fill(firstEmail)
   await page.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await page.getByLabel('Confirm Password').fill(e2ePassword)
   await secondPage.getByLabel('Email').fill(secondEmail)
   await secondPage.getByLabel('Password', { exact: true }).fill(e2ePassword)
-  await secondPage.getByLabel('Confirm Password').fill(e2ePassword)
 
+  // Two tabs authenticating as different accounts at the same moment: the
+  // refresh cookie is per-browser, so both must converge on one winner.
   await Promise.all([
-    page.getByRole('button', { name: 'Create Account' }).click(),
-    secondPage.getByRole('button', { name: 'Create Account' }).click(),
+    page.getByRole('button', { name: 'Login' }).click(),
+    secondPage.getByRole('button', { name: 'Login' }).click(),
   ])
 
   await expect(page).toHaveURL(/\/app$/)

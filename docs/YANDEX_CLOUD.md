@@ -108,7 +108,7 @@ COOKIE_SECURE=true
 
 Yandex Serverless Containers append the invoking user's address to `X-Forwarded-For`, including after any values supplied by the caller. Selecting the last value avoids trusting a caller-controlled first entry. Recheck this provider contract if the backend moves behind a different Yandex ingress product.
 
-`AUTH_RATE_LIMIT_*` configures an in-process `Map`, so it is only a per-instance backstop. `--concurrency 1` limits simultaneous calls inside one instance; it does not keep Serverless Containers on one instance, and the platform can start instances in multiple availability zones. For meaningful production protection of login/register/refresh/logout, attach Yandex Smart Web Security with an Advanced Rate Limiter profile to the API Gateway, or replace the backend limiter with shared cross-instance state. Do not use the older API Gateway `x-yc-apigateway-rate-limit` extension for a new deployment: Yandex marks it deprecated and directs users to Smart Web Security. A container instance cap is a capacity/cost control, not a security boundary.
+`AUTH_RATE_LIMIT_*` configures an in-process `Map`, so it is only a per-instance backstop. `--concurrency 1` limits simultaneous calls inside one instance; it does not keep Serverless Containers on one instance, and the platform can start instances in multiple availability zones. For meaningful production protection of login/refresh/logout, attach Yandex Smart Web Security with an Advanced Rate Limiter profile to the API Gateway, or replace the backend limiter with shared cross-instance state. Do not use the older API Gateway `x-yc-apigateway-rate-limit` extension for a new deployment: Yandex marks it deprecated and directs users to Smart Web Security. A container instance cap is a capacity/cost control, not a security boundary.
 
 Container environment variables are part of a revision. When deploying with `yc serverless container revision deploy --environment`, include the full required environment for that revision because changing environment variables creates a new revision. Prefer the console, Terraform, or Yandex Lockbox for sensitive values when shell quoting becomes risky.
 
@@ -358,7 +358,7 @@ After deployment:
 - verify browser auth only from allowed `CORS_ORIGINS`;
 - verify all cookie-backed auth writes reject missing or untrusted browser `Origin` headers;
 - verify the webapp and API use same-site custom domains and that a reload restores the cookie-backed session in a browser with third-party cookies blocked;
-- verify through API Gateway that register returns `Set-Cookie`, refresh receives that cookie, `/me` receives the bearer `Authorization` header, logout clears the cookie, and the next refresh returns 401;
+- verify through API Gateway that login returns `Set-Cookie`, refresh receives that cookie, `/me` receives the bearer `Authorization` header, logout clears the cookie, and the next refresh returns 401;
 - verify Managed PostgreSQL connectivity and that Prisma migrations applied exactly once;
 - verify the private auth cleanup timer is active and its most recent scheduled invocation completed with task exit code `0`;
 - verify `webapp` route refreshes load the SPA fallback instead of a broken 404 page;

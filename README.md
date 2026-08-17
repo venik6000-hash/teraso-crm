@@ -92,9 +92,9 @@ bun run --cwd backend prisma:generate
 bun run --cwd backend prisma:deploy
 ```
 
-Registration always creates the `user` role, and the CRM needs `admin`, so a
-self-registered local account can open only its own profile and settings. The
-seeded administrator is what opens the product. To make it usable, set
+There is no registration: the CRM serves one company, so accounts are created
+against a deployment rather than by whoever reaches the sign-in page. The seeded
+administrator is what opens the product. To make it usable, set
 `ADMIN_SEED_PASSWORD` in `backend/.env`, then run the idempotent seed:
 
 ```bash
@@ -129,7 +129,7 @@ bun run dev:backend
 bun run dev:webapp
 ```
 
-The webapp's register/login/session journey requires the backend and PostgreSQL, so run both together. `bun run dev:website` starts the deferred Astro surface and is not part of this project's workflow.
+The webapp's login/session journey requires the backend and PostgreSQL, so run both together. `bun run dev:website` starts the deferred Astro surface and is not part of this project's workflow.
 
 Create `webapp/.env` when the browser client should use a non-default API URL:
 
