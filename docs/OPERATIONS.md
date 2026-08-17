@@ -106,7 +106,7 @@ truth. See §6 for how to tell the two states apart.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES` | `15` | Minutes a task waits past its due time before the second, "Просроченная задача" nag. Max 1440. See §11.3. |
+| `NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES` | `15` | Minutes a task waits past its due time before the second, "Просроченная задача" nag. Max 1440. See §11.4. |
 | `AUTH_RATE_LIMIT_MAX` | `60` | Write requests allowed per IP per window. See §11.1 before changing. |
 | `AUTH_RATE_LIMIT_WINDOW_SECONDS` | `60` | Length of that window. |
 | `AUTH_BODY_LIMIT_BYTES` | `65536` | Maximum request size on the authenticated surface. |
@@ -273,11 +273,15 @@ Work down this list; the first three cost nothing.
 Do this after every deployment, after a secret rotation, and whenever someone
 says "we sent you a lead and it is not in the CRM".
 
-**Before you start, understand what this creates.** A test lead is a real lead.
-It creates a real client and a real deal that **cannot be deleted** from the CRM
-(§7). Use an obviously fake name and a `source` you will recognise later, such as
-`operations-check`, and afterwards move the deal to «Потеряна» so it leaves the
-active funnel. It stays in the history for good; that is by design.
+**Before you start, understand what this creates.** A test lead is a real lead:
+it creates a real client and a real deal. Use an obviously fake name and a
+`source` you will recognise later, such as `operations-check`, and afterwards
+move the deal to **«Архив»** so it leaves the board without disturbing anything.
+
+You *can* now delete it outright (§7), and for a health-check lead that is a
+defensible choice — but read §7 first, because deletion is permanent, and it
+frees the lead's `externalId` so a stray re-delivery would recreate it. The
+client record survives either way.
 
 Save this file as `send-test-lead.mjs` **outside the repository** (it does not
 contain a secret, but it is not project code):
@@ -368,7 +372,9 @@ not the server's configuration. On a deployment with no VAPID pair:
 - somebody pressing «Разрешить уведомления» gets a generic «Push не подключился»
   error, which looks like a browser problem.
 
-The reliable check is the API. Signed in, request:
+The reliable check is the API. Signed in **as an administrator** — the whole
+notification surface is administrator-only, so any other account gets `403` here
+rather than an answer about the configuration — request:
 
 ```
 GET /api/notifications/vapid-public-key
@@ -399,43 +405,95 @@ it, and the app cannot ask again.
 
 ---
 
-## 7. Nothing in the CRM deletes business records
+## 7. What the CRM can and cannot delete
 
-**The normal CRM interface never deletes a client, a deal, a task or a timeline
-entry.** Deals leave the funnel by being closed as won or lost, and the history
-stays. This is deliberate: the timeline is the record of what was promised to a
-customer.
+There are exactly two ways a deal leaves the working funnel, and telling them
+apart matters more than any other distinction in this document.
 
-This is not just a UI convention — it is enforced in two independent places:
+### «Архив» — reversible, loses nothing
 
-1. **There is no delete endpoint.** The only `DELETE` in the entire API removes a
-   *push subscription*. There is no API call that deletes a client, deal, task or
-   activity, so no screen and no script talking to the API can remove one.
-2. **The database refuses.** `deal_activities` and `ingestion_receipts` reference
-   `deals` with `ON DELETE RESTRICT`. Anyone deleting a deal directly in SQL gets:
+Moving a deal to **«Архив»** takes it off the board and stops it demanding a next
+step. Nothing is removed: the amounts, the tasks and the whole timeline stay
+exactly where they were, the deal is still found by the list's «Этап: Архив»
+filter, and **«Переоткрыть»** puts it back at «Новая заявка».
 
-   ```
-   ERROR:  update or delete on table "deals" violates RESTRICT setting of foreign key
-           constraint "deal_activities_deal_id_fkey" on table "deal_activities"
-   ```
+Two properties are worth knowing:
 
-   Deleting a **client** fails the same way: the client→deal link cascades, the
-   cascade reaches a deal that has history, and the RESTRICT stops the whole
-   statement. Nothing is deleted.
+- Archiving **does not touch recorded payments**, so a month that has already
+  been reported keeps reporting the same revenue after a tidy-up. Received money
+  is attributed by its own payment date, never by the deal's current stage.
+- Archiving **counts for nothing in the funnel**. The dashboard's conversion
+  report reads adjacent-stage moves only, so clearing a backlog of stale leads
+  cannot be mistaken for sales movement.
 
-Two honest caveats:
+This is the right answer to "get this off my board" in essentially every case.
+
+### «Удалить» — permanent, and the only irreversible action in the product
+
+`DELETE /api/crm/deals/{dealId}`, administrator-only like the rest of the CRM
+API, reached from the deal card behind a confirmation that names the client and
+the phone number. When it returns, the following are **gone and not recoverable
+except from a backup**:
+
+- the deal itself, and every task on it;
+- its **entire timeline** — the record of what was promised to that customer;
+- its marketing attribution and its ingestion receipts.
+
+Three consequences do not fit on a confirmation button:
+
+1. **Reported revenue changes.** Payments leave with the deal, so deleting a paid
+   deal lowers what a *closed* period reports. The confirmation warns about this
+   whenever the deal carries money, and points at the archive instead. If the
+   goal was tidiness rather than erasure, the archive is the correct action.
+2. **The lead can come back.** `(source, externalId)` is the site webhook's
+   idempotency key and it lives on the receipt that was just deleted, so a later
+   re-delivery of that same lead is ingested as a **new deal**. This is the
+   honest outcome — the CRM holds no record of it any more — and in practice the
+   site's retries land within minutes, long before anyone deletes by hand.
+3. **The client survives.** The client record, its phone and its other deals are
+   untouched, deliberately: the number stays known to the duplicate-phone warning
+   and a long-standing contractor keeps the history they are entitled to.
+
+### What still cannot be deleted through the API
+
+- **Clients.** There is no endpoint, and none is planned. A client with no deals
+  left is an ordinary, harmless state.
+- **A task or a timeline entry on its own.** Tasks are cancelled, never removed;
+  the log is append-only. Both can only disappear together with their deal.
+
+### The database guard is still there, and still matters
+
+`deal_activities` and `ingestion_receipts` reference `deals` with
+`ON DELETE RESTRICT`. That was **not** relaxed to build the delete button — the
+deletion path steps through it explicitly, inside one transaction, naming the two
+histories it destroys. Everything else in the codebase still gets this:
+
+```
+ERROR:  update or delete on table "deals" violates RESTRICT setting of foreign key
+        constraint "deal_activities_deal_id_fkey" on table "deal_activities"
+```
+
+So an accidental `deal.delete()` written anywhere else still fails loudly, and
+deleting a **client** in SQL fails the same way: the client→deal link cascades,
+the cascade reaches a deal that has history, and the RESTRICT stops the whole
+statement.
+
+Two honest caveats, unchanged:
 
 - The guard is **data-dependent, not structural**. A deal with no timeline entry
-  and no ingestion receipt is still deletable. Every deal created through the
-  normal flow has history from its first moment, so this is a narrow window, not
-  a hole you can drive through — but do not treat RESTRICT as an absolute lock.
+  and no ingestion receipt is still deletable in SQL. Every deal created through
+  the normal flow has history from its first moment, so this is a narrow window,
+  not a hole you can drive through — but do not treat RESTRICT as an absolute
+  lock.
 - It is a safety net against mistakes, **not a security control**. Anyone with
   direct database credentials can drop the constraint. Guard the database
   credentials.
 
-If a record genuinely must be removed — a duplicate created during testing, a
-legal erasure request — that is a deliberate, reviewed database operation with a
-fresh backup taken first. It is not a routine action and it has no button.
+### There is no deletion audit yet
+
+Nothing records who deleted what: the deal's history is destroyed along with the
+deal, and no entry is written anywhere else. If deletions ever need to be
+accountable, that is a separate log outside the deal's own timeline — see §12.
 
 ---
 
@@ -586,7 +644,9 @@ bun run --cwd backend prisma:deploy
 In the generated DigitalOcean spec this runs automatically as a pre-deploy job
 (`bun run db:deploy`), which applies migrations, optionally bootstraps the first
 administrator, and then refuses to let the deployment continue unless at least
-one administrator has a usable password.
+one administrator has a usable password. That last check is what keeps the CRM
+reachable at all: the product is administrator-only (§13), so a deployment with no
+login-capable administrator is a CRM nobody can open.
 
 ### The two CRM migrations must land together
 
@@ -677,17 +737,41 @@ Finally: the limit lives in the memory of a single API process. Running more tha
 one API instance multiplies the effective limit and makes it approximate. Before
 scaling horizontally, move this to a shared store or to the edge.
 
-### 11.2 The «Успех» board column grows forever
+### 11.2 The «Успех» board column grows unless somebody archives it
 
-Won deals are never archived, so that column grows for the life of the system.
-The board therefore shows at most **50** cards per column and states the truth
-underneath the heading: `Показано 50 из 240`. The badge count is always the real
-total.
+Nothing ages a won deal out of that column on its own, so it grows for the life
+of the system. The board therefore shows at most **50** cards per column and
+states the truth underneath the heading: `Показано 50 из 240`. The badge count is
+always the real total.
 
-Nothing needs doing about this. It is documented so that "the board is not showing
-all my won deals" is recognised as intended behaviour rather than a bug.
+Nothing *needs* doing about this — it is documented so that "the board is not
+showing all my won deals" is recognised as intended behaviour rather than a bug.
+If the column has become unreadable, moving finished jobs to **«Архив»** (§7) is
+the intended tidy-up: they leave the column, keep their revenue in the reports,
+and stay one filter away.
 
-### 11.3 Changing the overdue reminder delay needs a restart
+### 11.3 «Задачи» shows the 50 oldest overdue tasks, not all of them
+
+Nothing takes a task out of that queue except working it: an overdue task stays
+overdue until somebody completes, cancels or reschedules it. Two weeks away and the
+queue holds two weeks of backlog. So the list is capped at **50** rows — the cap is
+`CRITICAL_TASKS_LIMIT` — and it says so above them:
+`Показаны первые 50 задач, список длиннее`. Nothing has been lost: the tasks behind
+the cap are all still in the database, and they appear as the ones above them are
+worked off.
+
+**The ordering is what makes the cap safe.** The queue is sorted oldest overdue
+first, so the 50 rows on screen are the *most* overdue work and everything the cap
+hides is *less* overdue than every row shown — the truncated tail is the least
+urgent end of the backlog. Work down the list and the tail moves up. The board's cap
+runs the other way: it keeps each column's newest cards and hides the oldest.
+
+Unlike the board, this screen states no total: the sentence says the list is longer
+without saying by how much. The true number is on the dashboard — the
+«Просроченных задач» tile counts every overdue task and is not capped, so a tile
+reading 63 above a list of 50 rows is the two screens agreeing, not disagreeing.
+
+### 11.4 Changing the overdue reminder delay needs a restart
 
 `NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES` controls how long an unfinished task
 waits past its due time before the **second**, nagging notification. The first
@@ -699,7 +783,7 @@ dispatcher's own 24-hour lookback would quietly turn it into "never".
 
 Raise it if the follow-up feels naggy; lower it if things slip through.
 
-### 11.4 Local development traps
+### 11.5 Local development traps
 
 Two that cost the most time:
 
@@ -767,16 +851,62 @@ subtree so the form does not participate in the swap.
 The correct fix is to give the background refresh its own budget, separate from
 sign-in attempts. Until then, `AUTH_RATE_LIMIT_MAX` is the dial.
 
+### Registration is open, so accounts accumulate
+
+Anyone who can reach the deployment can create an account at `/signup`. Such an
+account is a `user`, so it can open **only** its own profile and settings — the CRM
+and the account console both refuse it in the interface and with `403` at the API
+(§13) — and it receives no notifications. **Impact: a growing list of useless
+accounts in `/admin/users`, not exposure of customer data.** There is no invite
+flow and no switch to close registration; the follow-up is to add one, and until
+then the administrator can see what has accumulated in the user directory.
+
+### Deleting a deal leaves no trace of who deleted it (§7)
+
+**Where:** `DELETE /api/crm/deals/{dealId}`.
+
+**What happens:** the deletion destroys the deal's own timeline along with the
+deal, and writes nothing anywhere else. Afterwards there is no record that the
+deal existed, let alone who removed it or when — the API knows the acting
+administrator and deliberately carries it down to the persistence layer, but
+there is nowhere durable to put it.
+
+**Severity:** low today, and stated rather than fixed on purpose. The CRM has one
+administrator (§13), so "who" has a single answer; the action is confirmed in the
+interface and cannot be reached by any other role. It stops being acceptable the
+moment the manager role of the roadmap ships and several people share the button.
+
+**Proposed fix, not applied:** an append-only deletion log in its own table —
+deal id, client name and phone, stage, recorded amounts, actor, timestamp —
+written in the same transaction as the deletion. It cannot live on the deal's own
+timeline, which is exactly what the operation erases.
+
+### The dashboard is not actually rate-limited (§11.1)
+
+`/api/crm/dashboard` is registered with the same ingress protection as the rest of
+the CRM, but the shared limiter deliberately exempts `GET` and the report is a
+`GET`, so the registration contributes only the body limit today. The dashboard is
+the heaviest query in the product, so a signed-in administrator refreshing it in a
+loop is unthrottled. **Impact: an administrator can slow their own deployment; no
+unauthenticated caller can.** The follow-up is a read budget separate from the
+write limiter.
+
 ---
 
 ## 13. Product decisions worth knowing
 
 Two behaviours that look like bugs if you do not know they were chosen.
 
-**Everyone lands in the CRM after signing in, including the administrator.** The
-owner *is* the administrator of the only account a Teraso deployment has, and the
-CRM — not user management — is what they open the app to use. `/admin` stays
-reachable from the sidebar for the rare account change.
+**The CRM is administrator-only; the account area is not.** Deals, the funnel,
+tasks, the dashboard, deal cards and notifications are the руководитель's, and the
+rule is enforced at the API — a signed-in `user` gets `403`, not an empty screen —
+as well as in the interface, where those sections are simply not offered. What any
+signed-in account keeps is its own corner of `/app`: the welcome screen, the
+profile and the settings. So every role lands on `/app` after signing in, but for
+the owner that is the entrance to the CRM with `/admin` one click away in the
+sidebar, and for anybody else it is the whole of what they can open. Notifications
+follow the same line: they are written for administrators only, because their text
+carries client names and each one links at a deal card.
 
 **The dashboard's «Задач на сегодня» and «Просроченных задач» tiles count tasks,
 and both link to the task list, not to the deal list.** One deal can carry several

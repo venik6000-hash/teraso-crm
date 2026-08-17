@@ -314,6 +314,14 @@ model PushSubscription {
   @@map("push_subscriptions")
 }
 
+/// Mirrors dealStageSchema in packages/contracts, value for value and in order;
+/// backend/src/contracts.test.ts asserts the parity mechanically.
+///
+/// ARCHIVED is appended rather than slotted beside LOST because PostgreSQL froze
+/// the first six values at CREATE TYPE and `ALTER TYPE ... ADD VALUE` can only
+/// extend that order. It is a terminal shelf: the board renders
+/// ACTIVE_DEAL_STAGES and the next-step rule reads OPEN_DEAL_STAGES, and it is in
+/// neither, so an archived deal occupies no column and is never critical.
 enum DealStage {
   NEW
   QUALIFIED
@@ -321,6 +329,7 @@ enum DealStage {
   PREPAYMENT
   WON
   LOST
+  ARCHIVED
 
   @@map("deal_stage")
 }

@@ -1,4 +1,5 @@
 import {
+  assignableUsersResponseSchema,
   clientLookupQuerySchema,
   clientLookupResponseSchema,
   criticalTasksResponseSchema,
@@ -8,6 +9,7 @@ import {
   dealBoardQuerySchema,
   dealBoardResponseSchema,
   dealCreateSchema,
+  dealDeleteResponseSchema,
   dealDetailResponseSchema,
   dealListQuerySchema,
   dealListResponseSchema,
@@ -83,6 +85,19 @@ export function listCriticalTasks(transport: AuthenticatedTransport) {
   return transport.request(`${CRM_BASE}/tasks/critical`, criticalTasksResponseSchema)
 }
 
+/**
+ * The people a deal may be made responsible for (PRD 7.1).
+ *
+ * Administrators only, decided entirely by the server: the CRM API and the
+ * notification fan-out are both administrator-only, so a picker that added
+ * anybody else would be offering an owner whose alerts nobody receives. The
+ * browser therefore filters nothing — it renders the list it was given.
+ */
+export async function listAssignableUsers(transport: AuthenticatedTransport) {
+  const response = await transport.request(`${CRM_BASE}/users`, assignableUsersResponseSchema)
+  return response.users
+}
+
 export async function createDealTask(
   transport: AuthenticatedTransport,
   dealId: string,
@@ -139,6 +154,23 @@ export async function updateDeal(
     { method: 'PATCH', body: dealUpdateSchema.parse(input) },
   )
   return response.deal
+}
+
+/**
+ * Erases a deal permanently. There is no undo behind this call and no soft
+ * delete on the server: the confirmation belongs to the interface, and by the
+ * time this resolves the deal, its tasks and its history are gone.
+ *
+ * It answers with the erased id, which the caller needs in order to know what to
+ * drop from the cache — there is no record left to hand back.
+ */
+export async function deleteDeal(transport: AuthenticatedTransport, dealId: string) {
+  const response = await transport.request(
+    `${CRM_BASE}/deals/${encodeURIComponent(dealId)}`,
+    dealDeleteResponseSchema,
+    { method: 'DELETE' },
+  )
+  return response.deletedDealId
 }
 
 export async function changeDealStage(

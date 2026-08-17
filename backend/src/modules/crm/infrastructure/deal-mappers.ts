@@ -149,6 +149,26 @@ export type DealDetailRow = Prisma.DealGetPayload<{ select: typeof dealDetailSel
 export type TaskRow = Prisma.DealTaskGetPayload<{ select: typeof taskSelect }>
 export type ActivityRow = Prisma.DealActivityGetPayload<{ select: typeof activitySelect }>
 
+/**
+ * The ACTIVE-task facts one deal's urgency needs, both derived from a single read
+ * of its active tasks (see `activeTaskFacts` in crm-repository.ts).
+ *
+ * They are carried together because `evaluateDealCriticality` needs both and one
+ * cannot be inferred from the other: `nearest` also fills `nearestActiveTask` on
+ * the DTO and decides `hasOverdueTask`, while `hasFutureTask` decides
+ * `noNextStep` — a deal can hold an overdue task and a future one at once.
+ */
+export type DealActiveTasks = {
+  readonly nearest: TaskRow | null
+  readonly hasFutureTask: boolean
+}
+
+/**
+ * A deal with no ACTIVE task at all: nothing overdue, and no next step. Shared by
+ * every caller, which is why the fields above are readonly.
+ */
+export const NO_ACTIVE_TASKS: DealActiveTasks = { nearest: null, hasFutureTask: false }
+
 /* ------------------------------------------------------------------ *
  * DTO builders
  *
@@ -216,14 +236,16 @@ export function toActivityDto(activity: ActivityRow): DealActivityDto {
 
 export function toDealSummary(
   deal: DealSummaryRow,
-  nearestActiveTask: TaskRow | null,
+  activeTasks: DealActiveTasks,
   now: Date,
 ): DealSummaryDto {
+  const nearestActiveTask = activeTasks.nearest
   const criticality = evaluateDealCriticality({
     stage: deal.stage,
     now,
     createdAt: deal.createdAt,
-    activeDueAt: nearestActiveTask?.dueAt ?? null,
+    nearestActiveDueAt: nearestActiveTask?.dueAt ?? null,
+    hasFutureActiveTask: activeTasks.hasFutureTask,
   })
 
   return {
@@ -266,14 +288,14 @@ export function toAttribution(deal: DealDetailRow): LeadAttributionDto | null {
 
 export function toDealDetail(
   deal: DealDetailRow,
-  nearestActiveTask: TaskRow | null,
+  activeTasks: DealActiveTasks,
   now: Date,
 ): DealDetailDto {
   const tasks = deal.tasks.slice(0, DEAL_DETAIL_TASK_LIMIT)
   const activities = deal.activities.slice(0, DEAL_DETAIL_ACTIVITY_LIMIT)
 
   return {
-    ...toDealSummary(deal, nearestActiveTask, now),
+    ...toDealSummary(deal, activeTasks, now),
     landingUrl: deal.landingUrl,
     material: deal.material,
     areaLabel: deal.areaLabel,

@@ -94,7 +94,14 @@ signed `POST /api/crm/inbound/quiz` -> lead visible and critical in `/app/deals`
 next-step task -> funnel moves, including a `PREPAYMENT` move refused without an
 amount and date -> full payment closes the deal as won -> the dashboard reports
 the full payment as revenue -> replaying the same `externalId` still leaves
-exactly one deal.
+exactly one deal -> the won deal is archived, leaves the board, keeps its revenue
+in the report and stays findable by `stage=ARCHIVED` -> deleting it warns about
+that revenue, returns to the list without the deal, and drops the amount from the
+dashboard.
+
+The tail is deliberately the two ways a deal leaves the funnel, run back to back:
+it is the only place that proves archiving and deletion differ in the way the
+product claims — one keeps a reported period intact, the other changes it.
 
 `receivedAt` is backdated well past the next-step window while the signature
 timestamp stays fresh, so the deal is already critical when the browser opens it

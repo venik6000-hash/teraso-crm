@@ -32,6 +32,7 @@ const listNotificationsRoute = createRoute({
     200: { ...jsonBody(notificationListResponseSchema), description: "The caller's own inbox" },
     400: { content: errorContent, description: 'Invalid query' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
   },
 })
 
@@ -44,6 +45,7 @@ const markReadRoute = createRoute({
     200: { ...jsonBody(notificationReadResponseSchema), description: 'Updated and unread counts' },
     400: { content: errorContent, description: 'Invalid payload' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     413: { content: errorContent, description: 'Request body is too large' },
     429: { content: errorContent, description: 'Too many requests' },
   },
@@ -58,6 +60,7 @@ const subscribeRoute = createRoute({
     201: { ...jsonBody(pushSubscriptionResponseSchema), description: 'Stored browser endpoint' },
     400: { content: errorContent, description: 'Invalid payload' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     413: { content: errorContent, description: 'Request body is too large' },
     429: { content: errorContent, description: 'Too many requests' },
   },
@@ -90,6 +93,7 @@ const unsubscribeRoute = createRoute({
     204: { description: 'Browser endpoint removed' },
     400: { content: errorContent, description: 'Invalid subscription id' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Subscription not found' },
   },
 })
@@ -108,11 +112,13 @@ const vapidPublicKeyRoute = createRoute({
       description: 'The public half of the VAPID pair',
     },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Browser push is not configured' },
   },
 })
 
 type CreateNotificationRoutesOptions = {
+  requireAdmin: MiddlewareHandler<AuthHttpEnv>
   requireAuth: MiddlewareHandler<AuthHttpEnv>
   service: NotificationService
   /**
@@ -124,6 +130,7 @@ type CreateNotificationRoutesOptions = {
 }
 
 export function createNotificationRoutes({
+  requireAdmin,
   requireAuth,
   service,
   vapidPublicKey,
@@ -131,13 +138,20 @@ export function createNotificationRoutes({
   const routes = new OpenAPIHono<AuthHttpEnv>({ defaultHook: validationErrorHook })
 
   /**
-   * PRD 10: access is enforced at the API, not only in the interface. Unlike the
+   * PRD 10: roles are enforced at the API, not only in the interface. Unlike the
    * CRM router — which has to leave `/inbound` unguarded for the HMAC-signed site
    * webhook — every path on this router serves one person's own inbox or their own
    * push endpoints, so the guard is a deliberate catch-all: a route added here
-   * later is authenticated by default rather than by remembering to list it.
+   * later is guarded by default rather than by remembering to list it.
+   *
+   * `requireAdmin` sits behind `requireAuth`, in that order, because it reads the
+   * principal the session guard sets. Both are needed: every notification body
+   * carries a client's name, and the deal card each one links to is administrator-
+   * only (PRD 3), so an inbox for an account that cannot open the CRM would leak
+   * exactly the data the CRM guard refuses it.
    */
   routes.use('*', requireAuth)
+  routes.use('*', requireAdmin)
 
   routes.openapi(listNotificationsRoute, async (c) => {
     return c.json(await service.list(c.req.valid('query'), c.var.user), 200)

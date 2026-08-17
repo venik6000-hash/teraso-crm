@@ -2,7 +2,9 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import {
   ACTIVE_DEAL_STAGES,
   CLIENT_DETAIL_DEAL_LIMIT,
+  CRITICAL_TASKS_LIMIT,
   DEAL_BOARD_COLUMN_LIMIT,
+  assignableUsersResponseSchema,
   clientDetailResponseSchema,
   clientLookupResponseSchema,
   criticalTasksResponseSchema,
@@ -38,7 +40,15 @@ maybeDescribe('CRM clients, deals and history integration', () => {
     SESSION_ABSOLUTE_TTL_DAYS: 90,
     SESSION_RETENTION_DAYS: 7,
     AUTH_BODY_LIMIT_BYTES: 64 * 1024,
-    AUTH_RATE_LIMIT_MAX: 600,
+    /**
+     * Headroom, not a product setting. The CRM rate limiter is one in-process
+     * bucket per client address, and this whole file is one address issuing every
+     * mutation it needs — the board-cap test alone posts 53 deals — so the budget
+     * has to exceed the file's total writes or an unrelated test 429s as the suite
+     * grows. The limiter's real behaviour is pinned by app.test.ts and the auth
+     * route tests, which set the maximum to 1 on purpose.
+     */
+    AUTH_RATE_LIMIT_MAX: 5_000,
     AUTH_RATE_LIMIT_WINDOW_SECONDS: 60,
     SHUTDOWN_GRACE_SECONDS: 20,
     TRUST_PROXY: false,
@@ -481,6 +491,155 @@ maybeDescribe('CRM clients, deals and history integration', () => {
   })
 
   /* ---------------------------------------------------------------- *
+   * Responsible user (PRD 7.1, PRD 12)
+   * ---------------------------------------------------------------- */
+
+  describe('responsible user', () => {
+    test('a manual deal stores the responsible the form sent and names them on the card', async () => {
+      const manager = await register('manager@teraso.com.ua', 'Менеджер')
+
+      const owned = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+        responsibleUserId: manager.user.id,
+      })
+      expect(owned.responsibleUserId).toBe(manager.user.id)
+      expect(owned.responsibleName).toBe('Менеджер')
+
+      // «Не назначен» is an ordinary answer: the grace window of PRD 7.4 exists
+      // precisely so a lead can be recorded before it is handed to anybody.
+      const unowned = await createDeal({
+        name: 'Ірина',
+        phone: '+380671112233',
+        source: 'Звонок',
+      })
+      expect(unowned.responsibleUserId).toBeNull()
+      expect(unowned.responsibleName).toBeNull()
+    })
+
+    /**
+     * The absent-versus-null rule, on the one field where getting it wrong is
+     * silent: an omitted key must leave the stored owner in place, and only an
+     * explicit `null` may unassign. A PATCH that sent `undefined` as `null` would
+     * hand every unrelated edit the power to orphan the deal.
+     */
+    test('separates an untouched responsible from one that is explicitly cleared', async () => {
+      const manager = await register('manager@teraso.com.ua', 'Менеджер')
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+        responsibleUserId: ownerId,
+      })
+
+      // An unrelated field edit must not touch the owner.
+      const untouched = await patchDeal(deal.id, { areaLabel: '45 м²' })
+      expect(untouched.responsibleUserId).toBe(ownerId)
+      expect(untouched.responsibleName).toBe('Руководитель')
+
+      const reassigned = await patchDeal(deal.id, { responsibleUserId: manager.user.id })
+      expect(reassigned.responsibleUserId).toBe(manager.user.id)
+      expect(reassigned.responsibleName).toBe('Менеджер')
+
+      const cleared = await patchDeal(deal.id, { responsibleUserId: null })
+      expect(cleared.responsibleUserId).toBeNull()
+      expect(cleared.responsibleName).toBeNull()
+      // The rest of the deal survived the unassignment.
+      expect(cleared.areaLabel).toBe('45 м²')
+
+      // Every move is in the log, by id, with the reassignment and the clearing
+      // told apart by `after` rather than by both reading as "empty".
+      expect(await fieldChanges(deal.id)).toEqual([
+        { field: 'areaLabel', before: null, after: '45 м²' },
+        { field: 'responsibleUserId', before: ownerId, after: manager.user.id },
+        { field: 'responsibleUserId', before: manager.user.id, after: null },
+      ])
+    })
+
+    test('re-sending the current responsible is not an edit and writes no history', async () => {
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+        responsibleUserId: ownerId,
+      })
+
+      await patchDeal(deal.id, { responsibleUserId: ownerId })
+
+      expect(activityKinds(await getDeal(deal.id))).toEqual(['DEAL_CREATED'])
+    })
+
+    test('«Только мои сделки» selects the deals of one administrator', async () => {
+      const manager = await register('manager@teraso.com.ua', 'Менеджер')
+      const mine = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+        responsibleUserId: ownerId,
+      })
+      await createDeal({
+        name: 'Ірина',
+        phone: '+380671112233',
+        source: 'Звонок',
+        responsibleUserId: manager.user.id,
+      })
+      await createDeal({ name: 'Нічия', phone: '+380509998877', source: 'Звонок' })
+
+      expect(await ids(`responsibleUserId=${ownerId}`)).toEqual([mine.id])
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * Assignable people (PRD 7.1, PRD 3)
+   * ---------------------------------------------------------------- */
+
+  describe('assignable people', () => {
+    /**
+     * The picker offers administrators only, and that is a correctness rule.
+     *
+     * The whole authenticated CRM is administrator-only, and a notification about
+     * an OWNED deal goes to that owner alone — so a deal handed to a
+     * self-registered account would alert somebody who answers 403 on the link,
+     * and nobody else. The refusal has to happen where the list is produced,
+     * because by the time a `responsibleUserId` reaches the database the foreign
+     * key is satisfied and nothing is left to object.
+     */
+    test('offers every administrator and no self-registered account', async () => {
+      const manager = await register('manager@teraso.com.ua', 'Менеджер')
+      const outsider = await registerWithoutPromotion('outsider@teraso.com.ua', 'Гость')
+
+      const users = await assignableUsers()
+
+      expect(users.map((user) => user.id)).toEqual([ownerId, manager.user.id])
+      expect(users.map((user) => user.name)).toEqual(['Руководитель', 'Менеджер'])
+      expect(users.some((user) => user.id === outsider.user.id)).toBe(false)
+      // Ids and display names only: the picker is not an account inventory, and
+      // the strict response schema is what refuses anything more.
+      expect(Object.keys(users[0]!).sort()).toEqual(['id', 'name'])
+    })
+
+    /** The display value falls back to the email, exactly as the card resolves it. */
+    test('names an administrator by their email when they set no display name', async () => {
+      await prisma.user.update({ where: { id: ownerId }, data: { displayName: null } })
+
+      expect((await assignableUsers()).map((user) => user.name)).toEqual(['owner@teraso.com.ua'])
+    })
+
+    test('promoting an account adds it to the picker without a second code path', async () => {
+      const outsider = await registerWithoutPromotion('outsider@teraso.com.ua', 'Гость')
+      expect((await assignableUsers()).map((user) => user.id)).toEqual([ownerId])
+
+      await prisma.user.update({ where: { id: outsider.user.id }, data: { role: 'admin' } })
+
+      expect((await assignableUsers()).map((user) => user.id)).toEqual([
+        ownerId,
+        outsider.user.id,
+      ])
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
    * Initial task
    * ---------------------------------------------------------------- */
 
@@ -777,6 +936,18 @@ maybeDescribe('CRM clients, deals and history integration', () => {
         phone: '+380671110009',
         source: 'teraso.com.ua',
       })
+      /**
+       * Two ACTIVE tasks at once — the state the nearest task alone cannot
+       * describe. Its earliest task is overdue, so the deal is late and critical,
+       * while a second task next week means a next step demonstrably exists (PRD
+       * acceptance 8). Reading `noNextStep` off the nearest task reported it as
+       * having none.
+       */
+      const overdueWithFuture = await createDeal({
+        name: 'Просрочка и будущий замер',
+        phone: '+380671110010',
+        source: 'teraso.com.ua',
+      })
 
       await prisma.dealTask.createMany({
         data: [
@@ -785,6 +956,18 @@ maybeDescribe('CRM clients, deals and history integration', () => {
             kind: 'CALL',
             title: 'Позвонить позже',
             dueAt: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000),
+          },
+          {
+            dealId: overdueWithFuture.id,
+            kind: 'CALL',
+            title: 'Просроченный звонок с замером',
+            dueAt: new Date(today.start.getTime() - 60 * 60 * 1000),
+          },
+          {
+            dealId: overdueWithFuture.id,
+            kind: 'CLARIFY',
+            title: 'Замер на следующей неделе',
+            dueAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
           },
           {
             // Yesterday in Kyiv: overdue for certain, and never inside today.
@@ -864,6 +1047,7 @@ maybeDescribe('CRM clients, deals and history integration', () => {
       return {
         withFutureTask,
         overdue,
+        overdueWithFuture,
         staleTaskless,
         freshTaskless,
         won,
@@ -887,11 +1071,18 @@ maybeDescribe('CRM clients, deals and history integration', () => {
           seeded.reopened.id,
         ]),
       )
-      // A completed or cancelled task is not active, so only the yesterday task is overdue.
-      expect(await ids('overdue=true')).toEqual([seeded.overdue.id])
+      // The deal holding an overdue task AND a future one has a next step, so it is
+      // late but never «Без следующего шага» (PRD acceptance 8).
+      expect(await ids('noNextStep=true')).not.toContain(seeded.overdueWithFuture.id)
+      // A completed or cancelled task is not active, so only the two yesterday
+      // tasks are overdue.
+      expect(sorted(await ids('overdue=true'))).toEqual(
+        sorted([seeded.overdue.id, seeded.overdueWithFuture.id]),
+      )
       expect(sorted(await ids('isCritical=true'))).toEqual(
         sorted([
           seeded.overdue.id,
+          seeded.overdueWithFuture.id,
           seeded.staleTaskless.id,
           seeded.completedTaskless.id,
           seeded.reopened.id,
@@ -912,10 +1103,21 @@ maybeDescribe('CRM clients, deals and history integration', () => {
      * while the DTO booleans are computed per row. This asserts they agree in
      * both directions — a filter that silently returned nothing would pass a
      * one-directional check.
+     *
+     * Both encodings agreeing is not enough on its own: `noNextStep` was once read
+     * off the nearest task on both sides, so both were wrong together and this
+     * guard stayed green. The fixture therefore has to contain the state that pulls
+     * the two facts apart, which the assertion below pins so it cannot quietly
+     * disappear from `seedFlagFixture`.
      */
     test('the SQL filter and the served flags agree in both directions', async () => {
       const seeded = await seedFlagFixture()
       const everything = await listDeals('pageSize=100')
+
+      // A deal that is overdue AND still has a next step: the only state in which
+      // the nearest task and the future-task fact disagree.
+      const twoTaskState = everything.items.find((deal) => deal.id === seeded.overdueWithFuture.id)
+      expect(twoTaskState).toMatchObject({ hasOverdueTask: true, noNextStep: false })
 
       /**
        * The filter key and the served flag are spelled differently for exactly
@@ -964,6 +1166,20 @@ maybeDescribe('CRM clients, deals and history integration', () => {
         hasOverdueTask: true,
         isCritical: true,
       })
+      /**
+       * An overdue task AND a future one. Late, therefore critical, but it has a
+       * next step: `noNextStep` asks whether anything is still ahead, not whether
+       * the nearest task has passed.
+       */
+      expect(byId.get(seeded.overdueWithFuture.id)).toMatchObject({
+        noNextStep: false,
+        hasOverdueTask: true,
+        isCritical: true,
+      })
+      // The nearest task stays the overdue one, so the card still shows what is late.
+      expect(byId.get(seeded.overdueWithFuture.id)?.nearestActiveTask?.title).toBe(
+        'Просроченный звонок с замером',
+      )
       expect(byId.get(seeded.staleTaskless.id)).toMatchObject({
         noNextStep: true,
         hasOverdueTask: false,
@@ -1341,6 +1557,312 @@ maybeDescribe('CRM clients, deals and history integration', () => {
 
       expect((await changeStage(omitted.id, { stage: 'NEW' })).lossReason).toBeNull()
       expect((await changeStage(explicit.id, { stage: 'NEW', lossReason: null })).lossReason).toBeNull()
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * The archive: a terminal shelf, deliberately outside the funnel
+   * ---------------------------------------------------------------- */
+
+  describe('archiving', () => {
+    test('shelves a deal from any stage, closed ones included', async () => {
+      const fresh = await createDeal({
+        name: 'Свежая',
+        phone: '+380671110010',
+        source: 'teraso.com.ua',
+      })
+      const won = await createDeal({
+        name: 'Успешная',
+        phone: '+380671110011',
+        source: 'teraso.com.ua',
+      })
+      const lost = await createDeal({
+        name: 'Потерянная',
+        phone: '+380671110012',
+        source: 'teraso.com.ua',
+      })
+      await advanceToWon(won.id)
+      await changeStage(lost.id, { stage: 'LOST', lossReason: 'NO_ANSWER' })
+
+      for (const [deal, from] of [
+        [fresh, 'NEW'],
+        [won, 'WON'],
+        [lost, 'LOST'],
+      ] as const) {
+        const archived = await changeStage(deal.id, { stage: 'ARCHIVED' })
+        expect(archived.stage).toBe('ARCHIVED')
+        expect(archived.activities[0]).toMatchObject({
+          kind: 'STAGE_CHANGED',
+          fromStage: from,
+          toStage: 'ARCHIVED',
+        })
+      }
+    })
+
+    /**
+     * Archiving a LOST deal drops «Причина потери» from the card, and that is
+     * the existing invariant rather than a new rule: `lossReason` is non-null
+     * only while the stage is LOST, in the contract and in the write alike.
+     *
+     * Nothing is lost by it — the STAGE_CHANGED row that recorded the loss still
+     * carries the reason in its metadata, so the timeline still answers "why did
+     * this end". Pinned here because it is the one visible consequence of the
+     * archive that somebody would otherwise mistake for a bug.
+     */
+    test('clears the loss reason from the card but not from the history', async () => {
+      const deal = await createDeal({
+        name: 'Потеряна и убрана',
+        phone: '+380671110018',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(deal.id, { stage: 'LOST', lossReason: 'CHOSEN_COMPETITOR' })
+
+      const archived = await changeStage(deal.id, { stage: 'ARCHIVED' })
+
+      expect(archived.lossReason).toBeNull()
+      const loss = archived.activities.find((activity) => activity.toStage === 'LOST')
+      expect(loss?.metadata).toEqual({ lossReason: 'CHOSEN_COMPETITOR' })
+    })
+
+    /**
+     * The one thing archiving must never touch.
+     *
+     * PRD 7.8 attributes received money by its own payment date rather than by
+     * the deal's stage, so a shelved deal still counts as revenue for the period
+     * it was actually paid in. Clearing the payments the way a reopen does would
+     * silently rewrite a closed month's takings every time the owner tidied up.
+     */
+    test('keeps recorded payments, so a shelved deal never rewrites past revenue', async () => {
+      const deal = await createDeal({
+        name: 'Оплаченная',
+        phone: '+380671110013',
+        source: 'teraso.com.ua',
+      })
+      await advanceToWon(deal.id)
+
+      const archived = await changeStage(deal.id, { stage: 'ARCHIVED' })
+
+      expect(archived.prepaymentAmount).toBe('20000.00')
+      expect(archived.prepaymentPaidAt).toBe('2026-07-20T09:00:00.000Z')
+      expect(archived.fullPaymentAmount).toBe('100000.00')
+      expect(archived.fullPaymentPaidAt).toBe('2026-07-22T09:00:00.000Z')
+    })
+
+    /**
+     * A shelved deal is quiet, which is the entire reason to shelve one. It is
+     * exempt from the next-step rule and cannot hold an overdue task in the
+     * critical queue, exactly as WON and LOST are.
+     */
+    test('stops demanding a next step and leaves the critical queue', async () => {
+      const deal = await createDeal({
+        name: 'Просроченная',
+        phone: '+380671110014',
+        source: 'teraso.com.ua',
+      })
+      await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Позвонить',
+        dueAt: pastIso(60 * 60 * 1000),
+      })
+
+      expect((await getDeal(deal.id)).isCritical).toBe(true)
+      expect((await criticalTasks()).items.some((item) => item.deal.id === deal.id)).toBe(true)
+
+      const archived = await changeStage(deal.id, { stage: 'ARCHIVED' })
+
+      expect(archived).toMatchObject({
+        isCritical: false,
+        noNextStep: false,
+        hasOverdueTask: false,
+      })
+      expect((await criticalTasks()).items.some((item) => item.deal.id === deal.id)).toBe(false)
+    })
+
+    /**
+     * Off the board, still in the list. The board is the working funnel and an
+     * archived deal is by definition not being worked, but it has to stay
+     * findable — otherwise «в архив» would be indistinguishable from «удалить».
+     */
+    test('leaves the board while staying findable in the list', async () => {
+      const deal = await createDeal({
+        name: 'Архивная',
+        phone: '+380671110015',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(deal.id, { stage: 'ARCHIVED' })
+
+      const board = await getBoard()
+      expect(board.columns.map((column) => column.stage)).toEqual([...ACTIVE_DEAL_STAGES])
+      expect(
+        board.columns.flatMap((column) => column.deals).some((entry) => entry.id === deal.id),
+      ).toBe(false)
+
+      const archivedOnly = await listDeals('stage=ARCHIVED')
+      expect(archivedOnly.items.map((item) => item.id)).toEqual([deal.id])
+    })
+
+    test('reopens out of the archive with a REOPENED event only', async () => {
+      const deal = await createDeal({
+        name: 'Вернулась',
+        phone: '+380671110016',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(deal.id, { stage: 'ARCHIVED' })
+
+      const reopened = await changeStage(deal.id, { stage: 'NEW' })
+
+      expect(reopened.stage).toBe('NEW')
+      expect(reopened.activities[0]).toMatchObject({
+        kind: 'REOPENED',
+        fromStage: 'ARCHIVED',
+        toStage: 'NEW',
+      })
+    })
+
+    /**
+     * The funnel counts adjacent pairs only, so an archive contributes to no step
+     * — including the one it left. Without this, clearing a backlog of stale
+     * PROPOSAL_SENT leads would read as sales movement in the owner's report.
+     */
+    test('adds nothing to the dashboard funnel', async () => {
+      const deal = await createDeal({
+        name: 'Из воронки',
+        phone: '+380671110017',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(deal.id, { stage: 'QUALIFIED' })
+      await changeStage(deal.id, { stage: 'ARCHIVED' })
+
+      const report = await getDashboard('period=month')
+      const steps = Object.fromEntries(
+        report.funnel.map((step) => [`${step.fromStage}->${step.toStage}`, step.count]),
+      )
+
+      expect(steps['NEW->QUALIFIED']).toBe(1)
+      expect(report.funnel.every((step) => step.toStage !== 'ARCHIVED')).toBe(true)
+      // Only the one real advance was recorded; the archive added no step at all.
+      expect(report.funnel.reduce((total, step) => total + step.count, 0)).toBe(1)
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * Permanent deletion
+   * ---------------------------------------------------------------- */
+
+  describe('deleting a deal', () => {
+    test('erases the deal with its tasks and its whole history', async () => {
+      const deal = await createDeal({
+        name: 'Под снос',
+        phone: '+380671110020',
+        source: 'teraso.com.ua',
+      })
+      await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Позвонить',
+        dueAt: futureIso(60 * 60 * 1000),
+      })
+      await addNote(deal.id, 'Что-то в ленте')
+
+      const response = await deleteDealRequest(deal.id)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ deletedDealId: deal.id })
+
+      expect(await prisma.deal.count({ where: { id: deal.id } })).toBe(0)
+      // The append-only log is declared onDelete: Restrict precisely so a stray
+      // delete cannot erase it. This path erases it on purpose, and nothing may
+      // be left dangling behind the deal that owned it.
+      expect(await prisma.dealActivity.count({ where: { dealId: deal.id } })).toBe(0)
+      expect(await prisma.dealTask.count({ where: { dealId: deal.id } })).toBe(0)
+    })
+
+    test('answers 404 for a deal that is already gone, so a double click is not a second success', async () => {
+      const deal = await createDeal({
+        name: 'Дважды',
+        phone: '+380671110021',
+        source: 'teraso.com.ua',
+      })
+
+      expect((await deleteDealRequest(deal.id)).status).toBe(200)
+      expect((await deleteDealRequest(deal.id)).status).toBe(404)
+      expect(
+        (await app.request(`/api/crm/deals/${deal.id}`, { headers: jsonHeaders(ownerToken) })).status,
+      ).toBe(404)
+    })
+
+    /**
+     * The client is not a deal and does not die with one (the product decision
+     * behind this feature). It keeps the phone known to the duplicate warning and
+     * keeps every other deal of that client whole.
+     */
+    test('keeps the client and its other deals', async () => {
+      const first = await createDeal({
+        name: 'Постоянный',
+        phone: '+380671110022',
+        source: 'teraso.com.ua',
+      })
+      await changeStage(first.id, { stage: 'LOST', lossReason: 'NEED_DISAPPEARED' })
+      const second = await createDeal({
+        name: 'Постоянный',
+        phone: '+380671110022',
+        source: 'teraso.com.ua',
+      })
+      expect(second.client.id).toBe(first.client.id)
+
+      expect((await deleteDealRequest(first.id)).status).toBe(200)
+
+      const client = await getClient(first.client.id)
+      expect(client.deals.map((entry) => entry.id)).toEqual([second.id])
+      expect(await prisma.client.count({ where: { id: first.client.id } })).toBe(1)
+    })
+
+    test('takes the deal off the board, the list and the critical queue at once', async () => {
+      const deal = await createDeal({
+        name: 'Исчезнет',
+        phone: '+380671110023',
+        source: 'teraso.com.ua',
+      })
+      await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Просроченный звонок',
+        dueAt: pastIso(60 * 60 * 1000),
+      })
+      expect((await criticalTasks()).items.some((item) => item.deal.id === deal.id)).toBe(true)
+
+      expect((await deleteDealRequest(deal.id)).status).toBe(200)
+
+      const board = await getBoard()
+      expect(
+        board.columns.flatMap((column) => column.deals).some((entry) => entry.id === deal.id),
+      ).toBe(false)
+      expect((await listDeals('')).items.some((item) => item.id === deal.id)).toBe(false)
+      expect((await criticalTasks()).items.some((item) => item.deal.id === deal.id)).toBe(false)
+    })
+
+    /**
+     * A deal's money leaves the dashboard with it, and that is the honest
+     * outcome rather than a bug: the CRM no longer holds the record the figure
+     * was read from, so continuing to report it would be reporting a deal that
+     * cannot be opened. Deleting a WON deal is therefore a decision about the
+     * books, which is exactly why the interface confirms it.
+     */
+    test('removes an erased deal from the reported revenue', async () => {
+      const deal = await createDeal({
+        name: 'С деньгами',
+        phone: '+380671110024',
+        source: 'teraso.com.ua',
+      })
+      await advanceToWon(deal.id)
+      expect((await getDashboard('period=month')).wonDealCount).toBe(1)
+
+      expect((await deleteDealRequest(deal.id)).status).toBe(200)
+
+      const report = await getDashboard('period=month')
+      expect(report.wonDealCount).toBe(0)
+      expect(report.wonPaymentAmount).toBe('0.00')
+    })
+
+    test('rejects a malformed id before it reaches persistence', async () => {
+      expect((await deleteDealRequest('not-a-uuid')).status).toBe(400)
     })
   })
 
@@ -1753,6 +2275,37 @@ maybeDescribe('CRM clients, deals and history integration', () => {
       expect(report.noNextStepDealCount).toBe(1)
     })
 
+    /**
+     * The counter version of the same defect (PRD 7.8 item 4). A deal carrying an
+     * overdue task and a future one is late and critical, but it is NOT without a
+     * next step — and «Без следующего шага» on the dashboard links straight to the
+     * list filter, so an inflated count would send the owner to a screen that
+     * disagrees with it.
+     */
+    test('keeps a deal with a later task out of the no-next-step count while still calling it critical', async () => {
+      const deal = await createDeal({
+        name: 'Просрочка и будущий замер',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      await createTask(deal.id, {
+        kind: 'CALL',
+        title: 'Просроченный звонок',
+        dueAt: new Date(Date.now() - 60_000).toISOString(),
+      })
+      await createTask(deal.id, {
+        kind: 'CLARIFY',
+        title: 'Замер на следующей неделе',
+        dueAt: futureIso(7 * 24 * 60 * 60 * 1000),
+      })
+
+      const report = await getDashboard('period=month')
+
+      expect(report.overdueTaskCount).toBe(1)
+      expect(report.criticalDealCount).toBe(1)
+      expect(report.noNextStepDealCount).toBe(0)
+    })
+
     test('builds the funnel from stage transitions inside the period, not the current stage', async () => {
       await seedDashboardFixtures()
 
@@ -1914,6 +2467,87 @@ maybeDescribe('CRM clients, deals and history integration', () => {
   })
 
   /* ---------------------------------------------------------------- *
+   * API access (PRD 3, PRD 10)
+   * ---------------------------------------------------------------- */
+
+  describe('api access', () => {
+    /**
+     * The regression guard for the whole access rule (PRD 3, PRD 10).
+     *
+     * `POST /api/auth/register` is open by design, and it creates the `user` role.
+     * Before `requireAdmin` was mounted, a self-registered account could read every
+     * client name, phone number, note, deal amount and marketing identifier in the
+     * CRM, and write to it. The refusal has to be 403 rather than 401 — the caller
+     * is genuinely signed in — and it has to hold on a read, a write and every
+     * guarded prefix, because each prefix carries its own `routes.use` pair and a
+     * dropped line would only show up on the path it guards.
+     */
+    test('refuses an authenticated non-administrator across the CRM surface', async () => {
+      const outsider = await registerWithoutPromotion('outsider@teraso.com.ua', 'Гость')
+      const deal = await createDeal({
+        name: 'Олександр',
+        phone: '+380935335353',
+        source: 'teraso.com.ua',
+      })
+      const headers = jsonHeaders(outsider.accessToken)
+      const requests: ReadonlyArray<readonly [string, RequestInit]> = [
+        ['/api/crm/dashboard?period=month', { headers }],
+        ['/api/crm/deals', { headers }],
+        ['/api/crm/deals/board', { headers }],
+        [`/api/crm/deals/${deal.id}`, { headers }],
+        ['/api/crm/tasks/critical', { headers }],
+        // The staff roster is refused too: a signed-in outsider must not be able
+        // to enumerate the administrators of a CRM they cannot open.
+        ['/api/crm/users', { headers }],
+        [`/api/crm/clients/${deal.client.id}`, { headers }],
+        ['/api/crm/clients/lookup?phone=%2B380935335353', { headers }],
+        [
+          '/api/crm/deals',
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              name: 'Чужой',
+              phone: '+380671110099',
+              source: 'teraso.com.ua',
+            }),
+          },
+        ],
+        [
+          `/api/crm/deals/${deal.id}/notes`,
+          { method: 'POST', headers, body: JSON.stringify({ text: 'Не должно записаться' }) },
+        ],
+      ]
+
+      for (const [path, init] of requests) {
+        const response = await app.request(path, init)
+        expect(`${init.method ?? 'GET'} ${path} -> ${response.status}`).toBe(
+          `${init.method ?? 'GET'} ${path} -> 403`,
+        )
+        expect((await response.json()).error.code).toBe('FORBIDDEN')
+      }
+
+      // The refused writes changed nothing: the deal created above is still the
+      // only one, and it carries no note.
+      expect(await prisma.deal.count()).toBe(1)
+      expect(await prisma.dealActivity.count({ where: { kind: 'NOTE_ADDED' } })).toBe(0)
+    })
+
+    /** The account area is not the product: a plain account keeps its own profile. */
+    test('leaves the account API open to a non-administrator', async () => {
+      const outsider = await registerWithoutPromotion('outsider@teraso.com.ua', 'Гость')
+
+      const response = await app.request('/api/users/me', {
+        method: 'PATCH',
+        headers: jsonHeaders(outsider.accessToken),
+        body: JSON.stringify({ displayName: 'Гость Гостевой' }),
+      })
+
+      expect(response.status).toBe(200)
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
    * Critical tasks (PRD 7.9 — the mobile critical-task view)
    * ---------------------------------------------------------------- */
 
@@ -1979,6 +2613,44 @@ maybeDescribe('CRM clients, deals and history integration', () => {
       expect(critical.items.map((item) => item.task.id)).toEqual([earlyTask.id, lateTask.id])
       expect(critical.items.map((item) => item.deal.id)).toEqual([early.id, late.id])
       expect(critical.items[0]?.deal).toMatchObject({ isCritical: true, hasOverdueTask: true })
+      // Well under the cap, so the queue is complete and says so.
+      expect(critical.hasMore).toBe(false)
+    })
+
+    /**
+     * Nothing ages out of this queue on its own: an overdue task stays overdue
+     * until somebody works it, so a fortnight away would otherwise return every
+     * late task in one response and mount a row for each.
+     */
+    test('caps the queue at CRITICAL_TASKS_LIMIT and reports that the list is longer', async () => {
+      const deal = await createDeal({
+        name: 'Завал',
+        phone: '+380671110001',
+        source: 'teraso.com.ua',
+      })
+      const overLimit = CRITICAL_TASKS_LIMIT + 3
+      await prisma.dealTask.createMany({
+        data: Array.from({ length: overLimit }, (_, index) => ({
+          dealId: deal.id,
+          kind: 'CALL' as const,
+          // Oldest first once ordered by due time, so the cap keeps the most overdue.
+          title: `Просрочен ${index}`,
+          dueAt: new Date(Date.now() - (overLimit - index) * 60_000),
+        })),
+      })
+
+      const critical = await criticalTasks()
+
+      expect(critical.items).toHaveLength(CRITICAL_TASKS_LIMIT)
+      expect(critical.hasMore).toBe(true)
+      // The oldest overdue task is the one that must survive the cap.
+      expect(critical.items[0]?.task.title).toBe('Просрочен 0')
+      // Every row still carries served urgency, and the deal remains critical.
+      expect(critical.items[0]?.deal).toMatchObject({
+        isCritical: true,
+        hasOverdueTask: true,
+        noNextStep: true,
+      })
     })
   })
 
@@ -2224,6 +2896,12 @@ maybeDescribe('CRM clients, deals and history integration', () => {
     return criticalTasksResponseSchema.parse(await response.json())
   }
 
+  async function assignableUsers() {
+    const response = await app.request('/api/crm/users', { headers: jsonHeaders(ownerToken) })
+    expect(response.status).toBe(200)
+    return assignableUsersResponseSchema.parse(await response.json()).users
+  }
+
   function activityKinds(deal: DealDetailDto) {
     return deal.activities.map((activity) => activity.kind)
   }
@@ -2244,6 +2922,15 @@ maybeDescribe('CRM clients, deals and history integration', () => {
   }
 
   const futureIso = (msFromNow: number) => new Date(Date.now() + msFromNow).toISOString()
+  /** Backdated due time: the API accepts one, which is how a task starts overdue. */
+  const pastIso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString()
+
+  function deleteDealRequest(dealId: string) {
+    return app.request(`/api/crm/deals/${dealId}`, {
+      method: 'DELETE',
+      headers: jsonHeaders(ownerToken),
+    })
+  }
 
   async function listDeals(query: string) {
     const response = await app.request(`/api/crm/deals${query ? `?${query}` : ''}`, {
@@ -2284,7 +2971,25 @@ maybeDescribe('CRM clients, deals and history integration', () => {
       .flatMap((activity) => activity.metadata?.changes ?? [])
   }
 
+  /**
+   * An administrator, because that is who the CRM API is for (PRD 3).
+   *
+   * Registration hands out the `user` role, so the account is promoted straight
+   * through Prisma afterwards. The token issued a moment earlier keeps working:
+   * the role is read from the database record on every request rather than from a
+   * JWT claim, so the very same session is now an administrator's.
+   *
+   * A fixture that stayed on the registered role would answer 403 to every request
+   * in this file, which is why the one deliberately unpromoted account lives in
+   * `registerWithoutPromotion` and is used by the refusal guard alone.
+   */
   async function register(email: string, displayName?: string) {
+    const session = await registerWithoutPromotion(email, displayName)
+    await prisma.user.update({ where: { id: session.user.id }, data: { role: 'admin' } })
+    return session
+  }
+
+  async function registerWithoutPromotion(email: string, displayName?: string) {
     const response = await app.request('/api/auth/token/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

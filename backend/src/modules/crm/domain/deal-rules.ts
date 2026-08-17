@@ -1,6 +1,7 @@
 import {
   NEXT_STEP_GRACE_MINUTES,
   OPEN_DEAL_STAGES,
+  dealStageSchema,
   type DealStage,
   type LossReason,
 } from '@teraso-crm/contracts'
@@ -12,9 +13,17 @@ import { CrmFailure } from './errors'
  * they are functions of wall-clock time, so any column would be stale the moment
  * nobody wrote to it.
  *
- * `activeDueAt` is the deal's nearest ACTIVE task due time, which is enough to
- * decide all three flags: if the earliest active task is already due then some
- * task is overdue, and if it is not in the future then there is no next step.
+ * The two ACTIVE-task facts below answer different questions and neither implies
+ * the other, which is why both are passed in:
+ *
+ * - `nearestActiveDueAt`, the earliest active task's due time, decides
+ *   `hasOverdueTask`: the minimum is at or before `now` exactly when some task is
+ *   already due.
+ * - `hasFutureActiveTask` decides `noNextStep`, and the nearest task cannot
+ *   stand in for it. A deal carrying a call overdue since yesterday AND a
+ *   measurement booked for next Tuesday has its minimum in the past while a next
+ *   step demonstrably exists (PRD acceptance 8: «все открытые сделки без будущей
+ *   активной задачи»).
  *
  * Task 4 owns stage transitions and adds `validateStageChange` beside this
  * function. The criticality rule lives here rather than in Task 4 because every
@@ -38,16 +47,19 @@ export function evaluateDealCriticality(input: {
   stage: DealStage
   now: Date
   createdAt: Date
-  activeDueAt: Date | null
+  /** The deal's nearest ACTIVE task due time, or null when it has none. */
+  nearestActiveDueAt: Date | null
+  /** Whether any ACTIVE task on the deal falls strictly after `now`. */
+  hasFutureActiveTask: boolean
 }): DealCriticality {
   // WON and LOST are exempt from the next-step rule entirely (PRD 7.4).
   if (!isOpenStage(input.stage)) {
     return { noNextStep: false, hasOverdueTask: false, isCritical: false }
   }
 
-  const due = input.activeDueAt
-  const hasOverdueTask = due !== null && due.getTime() <= input.now.getTime()
-  const noNextStep = due === null || due.getTime() <= input.now.getTime()
+  const nearestDue = input.nearestActiveDueAt
+  const hasOverdueTask = nearestDue !== null && nearestDue.getTime() <= input.now.getTime()
+  const noNextStep = !input.hasFutureActiveTask
   const graceElapsed = input.createdAt.getTime() <= nextStepGraceCutoff(input.now).getTime()
 
   return {
@@ -76,15 +88,23 @@ export function nextStepGraceCutoff(now: Date): Date {
  *
  *   advance  NEW -> QUALIFIED -> PROPOSAL_SENT -> PREPAYMENT -> WON
  *   lose     NEW | QUALIFIED | PROPOSAL_SENT | PREPAYMENT -> LOST
- *   reopen   WON | LOST -> NEW
+ *   archive  every stage except ARCHIVED -> ARCHIVED
+ *   reopen   WON | LOST | ARCHIVED -> NEW
  *
  * A reopen is deliberately a distinct kind, not an advance: it emits a REOPENED
  * activity only (never STAGE_CHANGED), because the dashboard funnel counts
  * STAGE_CHANGED rows and an administrative correction must not read as a
  * conversion (PRD 7.8 item 5).
+ *
+ * An archive is the widest move in the graph and the only one reachable from a
+ * closed stage, because that is what a shelf is for: a lead not worth naming a
+ * loss reason for, a job won last season, a loss already explained. It is not a
+ * loss — no reason is asked for or stored — so it cannot pollute the loss-reason
+ * breakdown, and it writes an ordinary STAGE_CHANGED row whose pair the funnel
+ * simply never looks up, exactly as `NEW -> LOST` already does.
  * ------------------------------------------------------------------ */
 
-export type StageTransitionKind = 'advance' | 'lose' | 'reopen'
+export type StageTransitionKind = 'advance' | 'lose' | 'archive' | 'reopen'
 
 export type StageTransition = { kind: StageTransitionKind }
 
@@ -106,6 +126,7 @@ const forwardStep: Record<DealStage, DealStage | null> = {
   PREPAYMENT: 'WON',
   WON: null,
   LOST: null,
+  ARCHIVED: null,
 }
 
 /** Human-readable stage names for the rejection message; PRD 7.3 wording. */
@@ -116,10 +137,22 @@ const stageLabels: Record<DealStage, string> = {
   PREPAYMENT: 'Предоплата',
   WON: 'Успех',
   LOST: 'Потеряна',
+  ARCHIVED: 'Архив',
 }
 
 const losableStages = new Set<DealStage>(OPEN_DEAL_STAGES)
-const reopenableStages = new Set<DealStage>(['WON', 'LOST'])
+
+/**
+ * Reopening is what a CLOSED deal does, so the set is derived as the complement
+ * of the open one rather than listed a third time.
+ *
+ * Listing it would be a copy of a fact the contracts already state, and the copy
+ * is what drifts: adding ARCHIVED to the enum without touching a hand-written
+ * `['WON', 'LOST']` would have shipped a stage nothing could ever leave.
+ */
+const reopenableStages = new Set<DealStage>(
+  dealStageSchema.options.filter((stage) => !openStages.has(stage)),
+)
 
 /**
  * A money string is a real amount only when it is present and above zero.
@@ -157,6 +190,14 @@ export function validateStageChange(input: StageChangeCheck): StageTransition {
       throw new CrmFailure('validation', 'Выберите причину потери')
     }
     return { kind: 'lose' }
+  }
+
+  // Reachable from every stage but itself: an archive is a shelf, and a deal
+  // already on the shelf has nowhere to move. No reason and no payment are read
+  // here, so shelving can neither invent revenue nor a loss reason.
+  if (to === 'ARCHIVED') {
+    if (from === 'ARCHIVED') throw illegalTransition(from, to)
+    return { kind: 'archive' }
   }
 
   if (to === 'NEW') {

@@ -17,9 +17,11 @@ import {
   changeDealStage,
   createDeal,
   createDealTask,
+  deleteDeal,
   getBoard,
   getDashboard,
   getDeal,
+  listAssignableUsers,
   listCriticalTasks,
   listDeals,
   lookupClient,
@@ -42,6 +44,11 @@ export const crmQueryKeys = {
   dashboard: (period: DashboardPeriod) => ['crm', 'dashboard', period] as const,
   clientLookup: (phone: string) => ['crm', 'client-lookup', phone] as const,
   criticalTasks: () => ['crm', 'critical-tasks'] as const,
+  /**
+   * Keyed under `crm` like the rest, so a session change evicts it with them, but
+   * deliberately NOT in the invalidation list below — see the note there.
+   */
+  assignableUsers: () => ['crm', 'assignable-users'] as const,
 }
 
 /**
@@ -60,6 +67,14 @@ export const crmQueryKeys = {
  * double entry is most likely.
  *
  * `notifications` is the root Task 8's notification feature keys under.
+ *
+ * `assignable-users` is deliberately ABSENT, and the omission is the decision
+ * rather than an oversight. The roster is the set of promoted accounts and their
+ * display names, both of which change only through the account console — no CRM
+ * mutation can alter either, so adding it would refetch the picker after every
+ * note, stage move and task for an answer that cannot have changed. The 30-second
+ * `staleTime` already picks up a rename on the next remount, and a picker keyed
+ * under `crm` is still evicted wholesale when the session changes.
  */
 export const crmInvalidatedRoots = [
   ['crm', 'deals'],
@@ -136,6 +151,22 @@ export function useCriticalTasksQuery() {
   })
 }
 
+/**
+ * The people a deal may be handed to (PRD 7.1).
+ *
+ * Called from the pages that own a form rather than from the forms themselves, so
+ * the list is already in cache by the time the sheet or the dialog opens — both
+ * mount their fields only once opened. It also keeps the two forms prop-driven and
+ * renderable in a test without a query client, matching every other CRM component.
+ */
+export function useAssignableUsersQuery() {
+  const auth = useAuth()
+  return useQuery({
+    queryKey: crmQueryKeys.assignableUsers(),
+    queryFn: () => listAssignableUsers(auth.transport),
+  })
+}
+
 export function useCreateTaskMutation(dealId: string) {
   const auth = useAuth()
   const invalidate = useInvalidateCrm()
@@ -204,6 +235,43 @@ export function useChangeDealStageMutation() {
     mutationFn: ({ dealId, input }: { dealId: string; input: DealStageChangeInput }) =>
       changeDealStage(auth.transport, dealId, input),
     onSuccess: invalidate,
+  })
+}
+
+/**
+ * The roots a DELETION refreshes: every one except the deal's own entry.
+ *
+ * That exclusion is the point. `['crm', 'deal', id]` addresses the record that
+ * was just erased, so invalidating it would refetch a 404 — repainting the card
+ * as «Сделка не открылась» on the owner's way out of it. The entry is dropped
+ * outright instead, which is both truthful and cheaper than a request whose only
+ * possible answer is "gone".
+ */
+export const deletionInvalidatedRoots = crmInvalidatedRoots.filter(
+  (root) => root[1] !== 'deal',
+)
+
+/**
+ * Erases a deal permanently.
+ *
+ * Nothing here is awaited, and that is deliberate rather than sloppy. The caller
+ * navigates away from the card in its own `onSuccess`, which runs straight after
+ * this one; awaiting the refetches would hold the browser on a card for a deal
+ * that no longer exists until every one of them settled. Dropping the entry and
+ * letting the remaining roots refresh in the background is what makes leaving
+ * immediate.
+ */
+export function useDeleteDealMutation() {
+  const auth = useAuth()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (dealId: string) => deleteDeal(auth.transport, dealId),
+    onSuccess: (deletedDealId) => {
+      queryClient.removeQueries({ queryKey: crmQueryKeys.deal(deletedDealId) })
+      for (const queryKey of deletionInvalidatedRoots) {
+        void queryClient.invalidateQueries({ queryKey })
+      }
+    },
   })
 }
 

@@ -63,8 +63,10 @@ import {
  * and «Сегодня» are independent switches. «Предоплата», «Успех» and «Потеряно»
  * all write the single-valued stage filter, so they are one single-choice group
  * under a heading that says as much — picking a second visibly releases the
- * first instead of silently overwriting it. The full six-stage list lives in
- * the filter sheet, because those three quick filters cover half the funnel.
+ * first instead of silently overwriting it. The complete stage list lives in the
+ * filter sheet and is rendered straight from `dealStageSchema.options`, so a
+ * stage added to the vocabulary — «Архив» was — becomes findable without a
+ * second list here to remember to extend.
  *
  * The «Активные фильтры» row is built from the query rather than from the
  * controls, so a filter with no control of its own — `isCritical`, which Task

@@ -48,6 +48,12 @@ const protectedRequests: ReadonlyArray<readonly [string, RequestInit | undefined
   ['/api/crm/tasks/critical', undefined],
   ['/api/crm/clients/lookup?phone=%2B380935335353', undefined],
   [`/api/crm/clients/${clientId}`, undefined],
+  // Its own `routes.use('/dashboard', ...)` for the same reason as /tasks: the
+  // path matches no other guarded prefix, and it reports the whole pipeline.
+  ['/api/crm/dashboard?period=month', undefined],
+  // Also its own guard: the staff picker names the people a deal can be handed
+  // to, which is not a roster an anonymous caller may enumerate.
+  ['/api/crm/users', undefined],
   [
     '/api/crm/deals',
     {
@@ -64,6 +70,10 @@ const protectedRequests: ReadonlyArray<readonly [string, RequestInit | undefined
       body: JSON.stringify({ currentNote: 'Перезвонить в пятницу' }),
     },
   ],
+  // Permanent and irreversible, so its guard matters more than any other on this
+  // list: an unguarded DELETE would let anyone who can reach the deployment erase
+  // a deal and its whole history.
+  [`/api/crm/deals/${dealId}`, { method: 'DELETE' }],
   [
     `/api/crm/deals/${dealId}/stage`,
     {
@@ -99,7 +109,15 @@ const protectedRequests: ReadonlyArray<readonly [string, RequestInit | undefined
 ]
 
 describe('CRM route authentication', () => {
-  /** PRD 10: roles and access are enforced at the API, not only in the interface. */
+  /**
+   * PRD 10: roles and access are enforced at the API, not only in the interface.
+   *
+   * These cases pin the anonymous half of the guard pair, which is all a stubbed
+   * Prisma client can reach: a request with no bearer token never gets far enough
+   * to have a role. The administrator half — a signed-in `user` account answered
+   * 403 rather than 200 — needs real sessions and lives in
+   * `crm.integration.test.ts` under «api access».
+   */
   test('rejects every CRM route without a bearer token', async () => {
     for (const [path, init] of protectedRequests) {
       const response = await app.request(path, init)
@@ -183,8 +201,38 @@ describe('CRM route registration', () => {
         '/api/crm/tasks/critical',
         '/api/crm/clients/lookup',
         '/api/crm/clients/{clientId}',
+        '/api/crm/dashboard',
       ]),
     )
+  })
+
+  /**
+   * The published contract has to admit that a signed-in caller can still be
+   * refused, or a generated client treats the administrator check as an unexpected
+   * failure. The webhook is outside all of this: it is a plain Hono router that
+   * authenticates by signature and has no role to check, so it is documented
+   * nowhere in this document — see `docs/CRM_INTEGRATION.md` for its contract.
+   */
+  test('documents administrator-only refusal on the authenticated CRM paths', async () => {
+    const document = (await (await app.request('/openapi.json')).json()) as {
+      paths: Record<string, Record<string, { responses: Record<string, unknown> }>>
+    }
+    const operations = [
+      ['/api/crm/deals', 'get'],
+      ['/api/crm/deals', 'post'],
+      ['/api/crm/deals/{dealId}', 'patch'],
+      ['/api/crm/tasks/{taskId}', 'patch'],
+      ['/api/crm/clients/{clientId}', 'get'],
+      ['/api/crm/dashboard', 'get'],
+    ] as const
+
+    for (const [path, method] of operations) {
+      const documented = document.paths[path]?.[method]?.responses ?? {}
+      expect(`${method} ${path} -> ${Object.hasOwn(documented, '403')}`).toBe(
+        `${method} ${path} -> true`,
+      )
+    }
+    expect(Object.keys(document.paths)).not.toContain('/api/crm/inbound/quiz')
   })
 
   test('applies the shared body limit to CRM writes', async () => {

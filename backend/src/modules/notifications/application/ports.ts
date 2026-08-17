@@ -149,9 +149,14 @@ export type NotificationRepository = NotificationWriter & {
   markDelivered(notificationId: string, state: NotificationDeliveryState): Promise<void>
 
   /**
-   * Everyone who should receive a notification nobody owns personally. PRD 3
-   * gives the MVP a single owner; this returns every user so the fan-out already
-   * has the shape the deferred manager role needs.
+   * Every administrator, as the recipients of a notification nobody owns
+   * personally.
+   *
+   * It is a list rather than a single id because PRD 3's deferred manager role
+   * will add recipients, so the fan-out already has the shape it needs. It is
+   * NOT every user: notification bodies carry client names and link at deal
+   * cards, both of which the CRM API serves to administrators alone, so a
+   * plain account must not be handed the same facts through its inbox.
    */
   listRecipientUserIds(): Promise<string[]>
 

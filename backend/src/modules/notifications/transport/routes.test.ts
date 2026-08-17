@@ -59,10 +59,15 @@ const protectedRequests: ReadonlyArray<readonly [string, RequestInit | undefined
 
 describe('notification route authentication', () => {
   /**
-   * PRD 10: access is enforced at the API, not only in the interface. Every route
+   * PRD 10: roles are enforced at the API, not only in the interface. Every route
    * on this router carries personal inbox content or a user's own push endpoints,
    * so the guard is a catch-all here — unlike the CRM router, which has to leave
    * room for the unauthenticated inbound webhook.
+   *
+   * These cases pin the anonymous half of the `requireAuth` + `requireAdmin` pair,
+   * which is as far as a stubbed Prisma client reaches. The administrator half — a
+   * signed-in `user` account answered 403 — needs real sessions and lives in
+   * `notifications.integration.test.ts` under «api access».
    */
   test('rejects every notification route without a bearer token', async () => {
     for (const [path, init] of protectedRequests) {
@@ -145,6 +150,30 @@ describe('notification route registration', () => {
     ]) {
       const response = await app.request(path)
       expect(`${path} -> ${response.status}`).toBe(`${path} -> 401`)
+    }
+  })
+
+  /**
+   * The inbox is administrator-only (PRD 3) because its bodies carry client names,
+   * so the published contract has to say a signed-in caller can still be refused.
+   */
+  test('documents administrator-only refusal on every notification path', async () => {
+    const document = (await (await app.request('/openapi.json')).json()) as {
+      paths: Record<string, Record<string, { responses: Record<string, unknown> }>>
+    }
+    const operations = [
+      ['/api/notifications', 'get'],
+      ['/api/notifications/read', 'post'],
+      ['/api/notifications/subscriptions', 'post'],
+      ['/api/notifications/subscriptions/{subscriptionId}', 'delete'],
+      ['/api/notifications/vapid-public-key', 'get'],
+    ] as const
+
+    for (const [path, method] of operations) {
+      const documented = document.paths[path]?.[method]?.responses ?? {}
+      expect(`${method} ${path} -> ${Object.hasOwn(documented, '403')}`).toBe(
+        `${method} ${path} -> true`,
+      )
     }
   })
 

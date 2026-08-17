@@ -1,8 +1,8 @@
 import {
-  dealUpdateSchema,
   leadClassSchema,
   materialSchema,
   preferredChannelSchema,
+  type AssignableUserDto,
   type DealDetailDto,
   type DealUpdateInput,
 } from '@teraso-crm/contracts'
@@ -25,9 +25,14 @@ import {
   DEAL_FIELD_LABELS,
   LEAD_CLASS_LABELS,
   MATERIAL_LABELS,
+  NOT_SET,
   PREFERRED_CHANNEL_LABELS,
+  assignableUserOptions,
+  buildDealUpdateInput,
+  toDealEditDraft,
+  type DealEditDraft,
 } from '../model'
-import { emptyFormErrors, toFormErrors } from '../validation'
+import { emptyFormErrors } from '../validation'
 import { CrmSelectField, CrmTextField } from './CrmField'
 
 /**
@@ -38,11 +43,11 @@ import { CrmSelectField, CrmTextField } from './CrmField'
  * hand a deal a payment date it never earned.
  *
  * Only changed fields are sent: an untouched key leaves the stored value alone
- * and an emptied optional field is sent as an explicit `null` to clear it.
+ * and an emptied optional field is sent as an explicit `null` to clear it. That
+ * diff is `buildDealUpdateInput`, kept in the model rather than here — this
+ * component renders inside a Dialog portal, and the absent-versus-null rule is
+ * the one piece of it whose failure is silent data loss.
  */
-
-/** Radix `Select` cannot carry an empty value, so "not set" needs a sentinel. */
-const NOT_SET = '__not_set__'
 
 function enumOptions<TOption extends string>(
   options: ReadonlyArray<TOption>,
@@ -54,77 +59,36 @@ function enumOptions<TOption extends string>(
   ]
 }
 
-type DraftState = {
-  name: string
-  source: string
-  form: string
-  landingUrl: string
-  leadClass: string
-  material: string
-  areaLabel: string
-  budgetLabel: string
-  objectType: string
-  needTiming: string
-  preferredChannel: string
-  potentialAmount: string
-}
-
-function toDraft(deal: DealDetailDto): DraftState {
-  return {
-    name: deal.client.name,
-    source: deal.source,
-    form: deal.form ?? '',
-    landingUrl: deal.landingUrl ?? '',
-    leadClass: deal.leadClass ?? NOT_SET,
-    material: deal.material ?? NOT_SET,
-    areaLabel: deal.areaLabel ?? '',
-    budgetLabel: deal.budgetLabel ?? '',
-    objectType: deal.objectType ?? '',
-    needTiming: deal.needTiming ?? '',
-    preferredChannel: deal.preferredChannel ?? NOT_SET,
-    potentialAmount: deal.potentialAmount ?? '',
-  }
-}
-
 export function DealEditDialog({
+  assignableUsers = [],
   deal,
   isSaving,
   onSubmit,
 }: {
+  /** Empty while the roster loads, which the parent page has already requested. */
+  assignableUsers?: ReadonlyArray<AssignableUserDto>
   deal: DealDetailDto
   isSaving: boolean
   onSubmit: (input: DealUpdateInput) => void
 }) {
-  const initial = toDraft(deal)
+  const initial = toDealEditDraft(deal)
   const [isOpen, setIsOpen] = useState(false)
   const [draft, setDraft] = useState(initial)
   const [errors, setErrors] = useState(emptyFormErrors)
 
-  const set = (field: keyof DraftState, value: string) =>
+  const set = (field: keyof DealEditDraft, value: string) =>
     setDraft((current) => ({ ...current, [field]: value }))
 
   const submit = () => {
-    const changed: Record<string, unknown> = {}
-    for (const key of Object.keys(initial) as Array<keyof DraftState>) {
-      if (draft[key] === initial[key]) continue
-      const value = draft[key].trim()
-      changed[key] = value === '' || value === NOT_SET ? null : value
-    }
-
-    if (Object.keys(changed).length === 0) {
-      setErrors({ fields: {}, formMessage: 'Изменений нет' })
-      return
-    }
-
-    const parsed = dealUpdateSchema.safeParse(changed)
-    if (!parsed.success) {
-      setErrors(toFormErrors(parsed.error.issues))
+    const built = buildDealUpdateInput(initial, draft)
+    if (!built.ok) {
+      setErrors(built.errors)
       return
     }
 
     setErrors(emptyFormErrors)
     setIsOpen(false)
-    onSubmit(parsed.data)
+    onSubmit(built.value)
   }
 
   return (
@@ -174,6 +138,15 @@ export function DealEditDialog({
             onChange={(value) => set('landingUrl', value)}
             placeholder="https://teraso.com.ua/..."
             value={draft.landingUrl}
+          />
+          {/* Beside the other «Основное» fields of the card (PRD 7.1), so the
+              dialog and the block it edits list them in the same order. */}
+          <CrmSelectField
+            error={errors.fields.responsibleUserId}
+            label={DEAL_FIELD_LABELS.responsible}
+            onChange={(value) => set('responsibleUserId', value)}
+            options={assignableUserOptions(assignableUsers)}
+            value={draft.responsibleUserId}
           />
           <CrmSelectField
             error={errors.fields.leadClass}

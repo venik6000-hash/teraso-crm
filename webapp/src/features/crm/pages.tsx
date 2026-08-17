@@ -58,7 +58,9 @@ import { SourcePerformanceTable } from './components/SourcePerformanceTable'
 import { StageCommitDialog } from './components/StageCommitDialog'
 import { TaskDialog } from './components/TaskDialog'
 import { TaskQueue } from './components/TaskQueue'
+import { TaskRescheduleDialog } from './components/TaskRescheduleDialog'
 import {
+  BOARD_TERMINAL_DROP_STAGES,
   DASHBOARD_PERIOD_LABELS,
   DEAL_DETAIL_ROUTE_PATH,
   DEAL_STAGE_LABELS,
@@ -76,6 +78,7 @@ import {
 } from './model'
 import {
   useAddDealNoteMutation,
+  useAssignableUsersQuery,
   useChangeDealStageMutation,
   useClientLookupQuery,
   useCreateDealMutation,
@@ -85,6 +88,7 @@ import {
   useDealBoardQuery,
   useDealQuery,
   useDealListQuery,
+  useDeleteDealMutation,
   useUpdateDealMutation,
   useUpdateTaskMutation,
 } from './queries'
@@ -112,6 +116,10 @@ export function DealsPage({ search }: { search: Partial<DealListQuery> }) {
 
   const deals = useDealListQuery(query)
   const lookup = useClientLookupQuery(lookupPhone)
+  // Requested with the list rather than inside the form: the sheet mounts its
+  // fields only once opened, so by the time the «Ответственный» select exists the
+  // roster is already cached.
+  const assignableUsers = useAssignableUsersQuery()
   const createDeal = useCreateDealMutation()
 
   const term = query.q ?? ''
@@ -233,6 +241,8 @@ export function DealsPage({ search }: { search: Partial<DealListQuery> }) {
           </SheetHeader>
           <div className="px-4 pb-6">
             <DealForm
+              assignableUsers={assignableUsers.data}
+              currentUserId={auth.user?.id}
               existingClient={lookup.data}
               isPending={createDeal.isPending}
               onCancel={() => setIsCreating(false)}
@@ -249,19 +259,44 @@ export function DealsPage({ search }: { search: Partial<DealListQuery> }) {
 
 export function DealPage({ dealId }: { dealId: string }) {
   const auth = useAuth()
+  const navigate = useNavigate()
   const deal = useDealQuery(dealId)
+  // Requested with the card, for the same reason the list requests it: the edit
+  // dialog renders its fields only once opened.
+  const assignableUsers = useAssignableUsersQuery()
   const updateDeal = useUpdateDealMutation(dealId)
   const changeStage = useChangeDealStageMutation()
   const addNote = useAddDealNoteMutation(dealId)
   const createTask = useCreateTaskMutation(dealId)
+  const updateTask = useUpdateTaskMutation()
+  const deleteDeal = useDeleteDealMutation()
+  const [completedTaskId, setCompletedTaskId] = useState<string | null>(null)
 
   const isSaving =
-    updateDeal.isPending || changeStage.isPending || addNote.isPending || createTask.isPending
+    updateDeal.isPending ||
+    changeStage.isPending ||
+    addNote.isPending ||
+    createTask.isPending ||
+    updateTask.isPending ||
+    deleteDeal.isPending
   const error =
     (updateDeal.isError ? updateDeal.error : null) ??
     (changeStage.isError ? changeStage.error : null) ??
     (addNote.isError ? addNote.error : null) ??
-    (createTask.isError ? createTask.error : null)
+    (createTask.isError ? createTask.error : null) ??
+    (updateTask.isError ? updateTask.error : null) ??
+    (deleteDeal.isError ? deleteDeal.error : null)
+
+  /**
+   * Completing a task does not satisfy the next-step rule on its own (PRD 7.4),
+   * so completing the LAST active one on an open deal opens the scheduling
+   * dialog right away — the same `shouldPromptNextStep` rule the critical queue
+   * uses on `/app/tasks`, read from the same refetched deal, so the two
+   * surfaces cannot disagree about whether a next step is still owed.
+   */
+  const needsNextStep = Boolean(
+    completedTaskId && deal.data && shouldPromptNextStep(deal.data, completedTaskId),
+  )
 
   return (
     <CrmPage
@@ -282,6 +317,7 @@ export function DealPage({ dealId }: { dealId: string }) {
       )}
       {deal.data && (
         <DealDetail
+          assignableUsers={assignableUsers.data}
           currentUserId={auth.user?.id}
           deal={deal.data}
           error={error}
@@ -299,6 +335,20 @@ export function DealPage({ dealId }: { dealId: string }) {
           onCreateTask={(input) =>
             createTask.mutate(input, { onSuccess: () => toast.success('Задача создана') })
           }
+          /*
+           * Leaving the card is part of the deletion, not a nicety: the deal it
+           * renders no longer exists, so staying would leave the owner looking at
+           * a card whose every control now answers 404. The list is where the
+           * next decision is made, and it has already been invalidated.
+           */
+          onDeleteDeal={() =>
+            deleteDeal.mutate(dealId, {
+              onSuccess: () => {
+                toast.success('Заявка удалена навсегда')
+                void navigate({ to: '/app/deals' })
+              },
+            })
+          }
           onSaveNote={(note) =>
             updateDeal.mutate(
               { currentNote: note },
@@ -308,6 +358,43 @@ export function DealPage({ dealId }: { dealId: string }) {
           onUpdateDeal={(input) =>
             updateDeal.mutate(input, { onSuccess: () => toast.success('Сделка обновлена') })
           }
+          onUpdateTask={(taskId, input) =>
+            updateTask.mutate(
+              { input, taskId },
+              {
+                onSuccess: () => {
+                  if (input.status === 'COMPLETED') {
+                    toast.success('Задача выполнена')
+                    setCompletedTaskId(taskId)
+                  } else if (input.status === 'CANCELLED') {
+                    toast.success('Задача отменена')
+                  } else {
+                    toast.success('Задача перенесена')
+                  }
+                },
+              },
+            )
+          }
+        />
+      )}
+
+      {needsNextStep && (
+        <TaskDialog
+          currentUserId={auth.user?.id}
+          description="Задача выполнена, но сделка ещё открыта — у неё должен быть следующий шаг."
+          isPending={createTask.isPending}
+          onOpenChange={(next) => !next && setCompletedTaskId(null)}
+          onSubmit={(input) =>
+            createTask.mutate(input, {
+              onSuccess: () => {
+                setCompletedTaskId(null)
+                toast.success('Следующий шаг назначен')
+              },
+            })
+          }
+          open
+          submitError={createTask.isError ? createTask.error : null}
+          title="Следующий шаг"
         />
       )}
     </CrmPage>
@@ -373,7 +460,11 @@ export function BoardPage({ search }: { search: Partial<DealBoardQuery> }) {
       commit(deal, { stage: intent.stage })
       return
     }
-    setMove({ deal, stage: intent.kind === 'loss' ? 'LOST' : intent.stage })
+    setMove({
+      deal,
+      stage:
+        intent.kind === 'payment' ? intent.stage : BOARD_TERMINAL_DROP_STAGES[intent.kind],
+    })
   }
 
   /**
@@ -452,12 +543,17 @@ export function BoardPage({ search }: { search: Partial<DealBoardQuery> }) {
  * Completing a task does not satisfy the next-step rule, so finishing the last
  * active task on an open deal opens the scheduling dialog straight away rather
  * than leaving the deal quietly critical.
+ *
+ * The queue also offers a reschedule, reusing the same `updateTask` mutation as
+ * completion — an overdue call very often needs to move rather than close.
+ * Cancelling a task is deliberately not offered here; see `TaskQueue`.
  */
 export function TasksPage() {
   const auth = useAuth()
   const critical = useCriticalTasksQuery()
   const updateTask = useUpdateTaskMutation()
   const [completed, setCompleted] = useState<CriticalTaskDto | null>(null)
+  const [reschedulingItem, setReschedulingItem] = useState<CriticalTaskDto | null>(null)
   const createTask = useCreateTaskMutation(completed?.deal.id ?? '')
 
   /**
@@ -496,7 +592,37 @@ export function TasksPage() {
           title="Очередь не загрузилась"
         />
       )}
-      {critical.data && <TaskQueue items={critical.data.items} onComplete={complete} />}
+      {critical.data && (
+        <TaskQueue
+          hasMore={critical.data.hasMore}
+          items={critical.data.items}
+          onComplete={complete}
+          onReschedule={setReschedulingItem}
+        />
+      )}
+
+      {reschedulingItem && (
+        <TaskRescheduleDialog
+          isPending={updateTask.isPending}
+          onOpenChange={(open) => {
+            if (!open) setReschedulingItem(null)
+          }}
+          onSubmit={(input) =>
+            updateTask.mutate(
+              { input, taskId: reschedulingItem.task.id },
+              {
+                onSuccess: () => {
+                  setReschedulingItem(null)
+                  toast.success('Задача перенесена')
+                },
+                onError: (error) => toast.error(error.message),
+              },
+            )
+          }
+          open
+          task={reschedulingItem.task}
+        />
+      )}
 
       {needsNextStep && completed && (
         <TaskDialog

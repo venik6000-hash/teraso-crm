@@ -77,6 +77,33 @@ test('account mutations share bounded write-rate protection', async () => {
   expect(limited.headers.get('retry-after')).toBeTruthy()
 })
 
+/**
+ * The read-only CRM paths are the ones that go missing from the ingress loop.
+ *
+ * The dashboard was the first — and it is the heaviest query in the product — and
+ * the staff picker is the second path whose whole surface is a GET. The body limit
+ * is what makes the registration observable: the rate limiter deliberately exempts
+ * GET, so the limiter contributes nothing to either today. The value of listing
+ * them is that a future write on those paths is covered by default rather than by
+ * remembering. `prisma` is never touched because 413 is decided before routing.
+ */
+test('every authenticated CRM path is inside the shared ingress protection', async () => {
+  const app = createApp({
+    env: { ...env, AUTH_BODY_LIMIT_BYTES: 32 },
+    prisma: {} as DbClient,
+  })
+
+  for (const path of ['/api/crm/dashboard', '/api/crm/users']) {
+    const response = await app.request(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ period: 'custom', note: 'x'.repeat(64) }),
+    })
+
+    expect(`${path} -> ${response.status}`).toBe(`${path} -> 413`)
+  }
+})
+
 test('OpenAPI documents account mutation ingress failures', async () => {
   const prisma = { $queryRaw: async () => [{ '?column?': 1 }] } as unknown as DbClient
   const app = createApp({ env, prisma })

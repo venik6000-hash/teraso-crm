@@ -212,9 +212,22 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
       })
     },
 
+    /**
+     * Administrators only, which is the same population the CRM API serves.
+     *
+     * A notification body carries a client's name and links at a deal card, and
+     * both are administrator-only (PRD 3). Fanning out to every row of `users`
+     * would hand a self-registered account the very facts `requireAdmin` refuses
+     * it, through an inbox whose links all answer 403. `users_role_idx` covers
+     * this filter.
+     */
     async listRecipientUserIds() {
-      const users = await db.user.findMany({ orderBy: { createdAt: 'asc' }, select: { id: true } })
-      return users.map((user) => user.id)
+      const admins = await db.user.findMany({
+        where: { role: 'admin' },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true },
+      })
+      return admins.map((admin) => admin.id)
     },
 
     /**
@@ -269,10 +282,11 @@ export function createPrismaNotificationRepository(db: DbClient): NotificationRe
      *
      * `nextStepGraceCutoff` is the CRM's own, so the window is read from one place.
      * The task predicate deliberately does NOT reuse `evaluateDealCriticality`:
-     * its `noNextStep` means "no FUTURE task" and so is also true of a deal whose
-     * task is merely overdue — right for the list filter, wrong for an alert that
-     * says «без задачи». See `leadRecords` for why the three conditions have to
-     * stay disjoint.
+     * its `noNextStep` means "no ACTIVE task in the FUTURE" and so is also true of
+     * a deal whose only task is already overdue — right for the list filter, wrong
+     * for an alert that says «без задачи». `none: { status: 'ACTIVE' }` is the
+     * stricter condition: no active task at any time, past or future. See
+     * `leadRecords` for why the three conditions have to stay disjoint.
      *
      * NOTE for the next consumer: this is the second place that queries CRM tables
      * from outside the CRM module, and `architecture:check` cannot see that

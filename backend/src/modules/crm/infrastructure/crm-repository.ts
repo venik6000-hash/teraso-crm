@@ -1,6 +1,7 @@
 import {
   ACTIVE_DEAL_STAGES,
   CLIENT_DETAIL_DEAL_LIMIT,
+  CRITICAL_TASKS_LIMIT,
   DEAL_BOARD_COLUMN_LIMIT,
   DEALS_MAX_PAGE,
   NEXT_STEP_GRACE_MINUTES,
@@ -25,6 +26,7 @@ import { Prisma } from '../../../generated/prisma/client'
 import type {
   CrmRepository,
   DealCreateCommand,
+  DealDeleteCommand,
   DealStageChangeCommand,
   DealUpdateCommand,
   InboundQuizLeadCommand,
@@ -34,6 +36,7 @@ import type {
 import { validateStageChange } from '../domain/deal-rules'
 import { CrmFailure } from '../domain/errors'
 import {
+  NO_ACTIVE_TASKS,
   activitySelect,
   clientSummarySelect,
   dealDetailSelect,
@@ -45,6 +48,7 @@ import {
   toDealSummary,
   toTaskDto,
   type ActivityRow,
+  type DealActiveTasks,
   type DealSummaryRow,
   type TaskRow,
 } from './deal-mappers'
@@ -64,12 +68,20 @@ import { toMoneyString } from './serialization'
 
 export function createPrismaCrmRepository(db: DbClient): CrmRepository {
   /**
-   * The nearest ACTIVE task for a page of deals, in one query. It is fetched
-   * separately rather than as a relation on the select because the deal detail
-   * needs both this and the capped task list, and a Prisma select cannot include
-   * the same relation twice with different arguments.
+   * The ACTIVE-task facts urgency needs for a page of deals, in one query. It is
+   * fetched separately rather than as a relation on the select because the deal
+   * detail needs both this and the capped task list, and a Prisma select cannot
+   * include the same relation twice with different arguments.
+   *
+   * Every active task of every requested deal is read, so both facts come out of
+   * this single pass: the first row per deal is its nearest task, and any row due
+   * after `now` proves a next step exists. Answering `hasFutureTask` with a second
+   * query would be a second round trip for data already in hand.
    */
-  async function nearestActiveTasks(dealIds: string[]): Promise<Map<string, TaskRow>> {
+  async function activeTaskFacts(
+    dealIds: string[],
+    now: Date,
+  ): Promise<Map<string, DealActiveTasks>> {
     if (dealIds.length === 0) return new Map()
 
     const tasks = await db.dealTask.findMany({
@@ -78,24 +90,34 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
       select: taskSelect,
     })
 
-    const nearest = new Map<string, TaskRow>()
+    const facts = new Map<string, DealActiveTasks>()
     for (const task of tasks) {
-      if (!nearest.has(task.dealId)) nearest.set(task.dealId, task)
+      const seen = facts.get(task.dealId)
+      facts.set(task.dealId, {
+        // The rows arrive soonest first, so the first one seen is the nearest.
+        nearest: seen?.nearest ?? task,
+        // Any row, not only the nearest, can be the future task the next-step
+        // rule asks about.
+        hasFutureTask: (seen?.hasFutureTask ?? false) || task.dueAt.getTime() > now.getTime(),
+      })
     }
-    return nearest
+    return facts
   }
 
   async function summariesFor(deals: DealSummaryRow[], now: Date): Promise<DealSummaryDto[]> {
-    const nearest = await nearestActiveTasks(deals.map((deal) => deal.id))
-    return deals.map((deal) => toDealSummary(deal, nearest.get(deal.id) ?? null, now))
+    const facts = await activeTaskFacts(
+      deals.map((deal) => deal.id),
+      now,
+    )
+    return deals.map((deal) => toDealSummary(deal, facts.get(deal.id) ?? NO_ACTIVE_TASKS, now))
   }
 
   async function detailFor(dealId: string, now: Date): Promise<DealDetailDto | null> {
     const deal = await db.deal.findUnique({ where: { id: dealId }, select: dealDetailSelect })
     if (!deal) return null
 
-    const nearest = await nearestActiveTasks([deal.id])
-    return toDealDetail(deal, nearest.get(deal.id) ?? null, now)
+    const facts = await activeTaskFacts([deal.id], now)
+    return toDealDetail(deal, facts.get(deal.id) ?? NO_ACTIVE_TASKS, now)
   }
 
   return {
@@ -233,6 +255,10 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
       return detailFor(command.dealId, command.now)
     },
 
+    deleteDeal(command) {
+      return eraseDeal(db, command)
+    },
+
     async addNote({ dealId, text, actorUserId, now }) {
       const deal = await db.deal.findUnique({ where: { id: dealId }, select: { id: true } })
       if (!deal) return null
@@ -262,6 +288,11 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
      * or before `now` on an OPEN deal, soonest first. A deal that is critical
      * only for having no next step has no task to surface here and belongs to the
      * critical-deals list instead.
+     *
+     * Capped at CRITICAL_TASKS_LIMIT, the oldest overdue tasks first — nothing
+     * leaves this queue by itself, so an unbounded one grows for as long as nobody
+     * works it. One extra row answers `hasMore` without a second count, exactly as
+     * `findClient` does for `hasMoreDeals`.
      */
     async listCriticalTasks(now) {
       const rows = await db.dealTask.findMany({
@@ -271,15 +302,18 @@ export function createPrismaCrmRepository(db: DbClient): CrmRepository {
           deal: { stage: { in: [...OPEN_DEAL_STAGES] } },
         },
         orderBy: [{ dueAt: 'asc' }, { id: 'asc' }],
+        take: CRITICAL_TASKS_LIMIT + 1,
         select: { ...taskSelect, deal: { select: dealSummarySelect } },
       })
 
-      const nearest = await nearestActiveTasks([...new Set(rows.map((row) => row.deal.id))])
+      const paged = rows.slice(0, CRITICAL_TASKS_LIMIT)
+      const facts = await activeTaskFacts([...new Set(paged.map((row) => row.deal.id))], now)
       return {
-        items: rows.map((row) => ({
+        items: paged.map((row) => ({
           task: toTaskDto(row),
-          deal: toDealSummary(row.deal, nearest.get(row.deal.id) ?? null, now),
+          deal: toDealSummary(row.deal, facts.get(row.deal.id) ?? NO_ACTIVE_TASKS, now),
         })),
+        hasMore: rows.length > CRITICAL_TASKS_LIMIT,
       } satisfies CriticalTasksResponse
     },
 
@@ -812,6 +846,51 @@ async function applyStageChange(db: DbClient, command: DealStageChangeCommand): 
   }
 }
 
+/**
+ * Erases a deal permanently: the row, and everything that only existed because
+ * of it. Returns false when there was no such deal (a 404 upstream).
+ *
+ * The two explicit `deleteMany` calls are the whole point of this function.
+ * `DealActivity` and `IngestionReceipt` are declared `onDelete: Restrict` so that
+ * a stray `deal.delete()` anywhere else in this codebase fails loudly instead of
+ * quietly erasing an append-only log (see the schema notes on both models). That
+ * guarantee is deliberately kept: this is the ONE path allowed through it, and it
+ * has to say out loud which histories it is destroying. Tasks, attribution and
+ * notifications cascade on their own — none of them is a record of what happened,
+ * so none of them carries the Restrict.
+ *
+ * Deleting the receipts has a consequence worth stating: `(source, externalId)`
+ * is the webhook's idempotency identity, so a later re-delivery of the same site
+ * lead will be ingested as a new deal rather than recognized as a duplicate. That
+ * is the honest outcome — the CRM no longer holds any record of that lead — and
+ * retries arrive within minutes, long before anybody deletes anything by hand.
+ *
+ * The client is never touched. It outlives its deals on purpose: the phone stays
+ * known to the duplicate-phone warning, and a contractor's other deals keep the
+ * history they are entitled to.
+ */
+async function eraseDeal(db: DbClient, command: DealDeleteCommand): Promise<boolean> {
+  const { dealId } = command
+
+  try {
+    return await db.$transaction(async (tx) => {
+      // The same per-deal advisory lock every other write takes, so a deletion
+      // racing a stage move cannot land between that move's read and its write.
+      await lockDeal(tx, dealId)
+      const existing = await tx.deal.findUnique({ where: { id: dealId }, select: { id: true } })
+      if (!existing) return false
+
+      await tx.dealActivity.deleteMany({ where: { dealId } })
+      await tx.ingestionReceipt.deleteMany({ where: { dealId } })
+      await tx.deal.delete({ where: { id: dealId } })
+
+      return true
+    })
+  } catch (error) {
+    throw translateWriteError(error)
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * Tasks
  * ------------------------------------------------------------------ */
@@ -985,12 +1064,19 @@ async function recordInboundQuizLeadTransaction(
           externalId,
         }
 
+        // What the customer wrote rides on the event itself rather than on a deal
+        // column: the log is append-only, so the message stays as delivered even
+        // after somebody edits the card, and a second submission keeps its own text
+        // instead of overwriting the first one's.
+        const inboundNote = input.note?.trim() || null
+
         if (openDeal) {
           await appendActivity(tx, {
             dealId: openDeal.id,
             kind: 'INBOUND_LEAD_RECEIVED',
             authorUserId: null,
             now,
+            text: inboundNote,
             metadata: inboundMetadata,
           })
           await writeInboundReceipt(tx, input.source, externalId, openDeal.id, receivedAt)
@@ -1024,6 +1110,7 @@ async function recordInboundQuizLeadTransaction(
           kind: 'INBOUND_LEAD_RECEIVED',
           authorUserId: null,
           now,
+          text: inboundNote,
           metadata: inboundMetadata,
         })
 

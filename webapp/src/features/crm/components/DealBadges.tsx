@@ -25,6 +25,9 @@ const stageVariant: Record<DealStage, 'default' | 'secondary' | 'outline' | 'des
   PREPAYMENT: 'outline',
   WON: 'outline',
   LOST: 'destructive',
+  // Quiet on purpose: an archived deal is parked, not failed, so it must not
+  // borrow the loss badge's alarm. The label carries the meaning either way.
+  ARCHIVED: 'secondary',
 }
 
 export function StageBadge({ stage }: { stage: DealStage }) {

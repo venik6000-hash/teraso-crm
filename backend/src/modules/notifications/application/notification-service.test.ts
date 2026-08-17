@@ -36,6 +36,11 @@ function createFakeRepository(
   options: {
     dueTasks?: DueTaskCondition[]
     leadsNeedingAction?: LeadNeedsActionCondition[]
+    /**
+     * What `listRecipientUserIds` returns, which in production is every
+     * administrator and never every user: the fan-out for an unowned fact is
+     * scoped to the accounts allowed to open the CRM (PRD 3).
+     */
     recipients?: string[]
     subscriptions?: Record<string, StoredPushSubscription[]>
   } = {},
@@ -304,12 +309,13 @@ describe('NotificationService.dispatchDueEvents', () => {
     expect(repository.notifications).toHaveLength(0)
   })
 
-  test('an assigned task notifies its assignee alone, an unassigned one every user', async () => {
+  test('an assigned task notifies its assignee alone, an unassigned one every administrator', async () => {
     const repository = createFakeRepository({
       dueTasks: [
         { ...taskDueNow, taskId: 'task-assigned', assigneeUserId: 'owner-2' },
         { ...taskDueNow, taskId: 'task-open', assigneeUserId: null },
       ],
+      // Two administrators, which is what the repository's role filter returns.
       recipients: ['owner-1', 'owner-2'],
     })
     const { service } = buildService({ delivery: createFakeDelivery().delivery, now, repository })
@@ -517,7 +523,7 @@ describe('NotificationService.newLeadRecorded', () => {
     source: 'teraso.com.ua',
   }
 
-  test('announces one NEW_LEAD per recipient and stays quiet when the fact is replayed', async () => {
+  test('announces one NEW_LEAD per administrator and stays quiet when the fact is replayed', async () => {
     const repository = createFakeRepository({ recipients: ['owner-1', 'owner-2'] })
     const { service, settle } = buildService({
       delivery: createFakeDelivery().delivery,

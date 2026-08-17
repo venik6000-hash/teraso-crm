@@ -25,6 +25,7 @@ test('profile updates project the updated user without a post-write read', async
       total: 0,
       hasNext: false,
     }) },
+    assignableUsersReader: { listAssignableUsers: async () => [] },
     clock: { now: () => new Date('2026-07-20T00:00:00.000Z') },
     profileWriter: {
       updateProfile: async (_userId, displayName) => ({

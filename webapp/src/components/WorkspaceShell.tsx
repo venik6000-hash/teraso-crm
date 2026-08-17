@@ -94,6 +94,15 @@ export function WorkspaceShell({
   const pathname = useLocation({ select: (location) => location.pathname })
   const navigationItems = navigationItemsForWorkspace(workspace, user.role)
   const activeItem = navigationItems.find((item) => item.to === pathname)
+  /**
+   * The bell is a shortcut into the same inbox `/app/notifications` serves, and
+   * that screen is part of the administrator-only CRM product. Deriving it from the
+   * navigation the model already decided keeps the role rule in one place: an
+   * account with no entry for the inbox gets no bell either. Mounting it for
+   * everyone made a plain account call `/api/notifications` on every page of the
+   * account area and take a 403 each time.
+   */
+  const showsInbox = navigationItems.some((item) => item.to === '/app/notifications')
   const labels = labelsByWorkspace[workspace]
   const homePath = workspace === 'admin' ? '/admin' : '/app'
   const settingsPath = workspace === 'admin' ? '/admin/settings' : '/app/settings'
@@ -118,13 +127,14 @@ export function WorkspaceShell({
       />
       <SidebarInset>
         {/*
-          The inbox belongs to the CRM workspace as a whole, not to one screen:
-          a new lead has to be visible from the profile and settings pages too.
-          The account console is the template's own English surface and has no
-          CRM notifications to show.
+          The inbox belongs to the CRM workspace as a whole, not to one screen: a
+          new lead has to be visible from the profile and settings pages too. The
+          account console is the template's own English surface and has no CRM
+          notifications to show, and an account that cannot open the CRM has no
+          notifications at all — the backend writes them for administrators only.
         */}
         <SiteHeader
-          actions={workspace === 'crm' ? <NotificationCenter /> : undefined}
+          actions={workspace === 'crm' && showsInbox ? <NotificationCenter /> : undefined}
           title={activeItem?.label ?? labels.fallbackTitle}
         />
         <div className="flex min-w-0 flex-1 flex-col">{children}</div>

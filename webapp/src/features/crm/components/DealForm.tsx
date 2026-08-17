@@ -1,12 +1,13 @@
 import { Link } from '@tanstack/react-router'
 import {
-  dealCreateSchema,
   leadClassSchema,
   materialSchema,
   preferredChannelSchema,
   taskKindSchema,
+  type AssignableUserDto,
   type ClientLookupResponse,
   type DealCreateInput,
+  type TaskKind,
 } from '@teraso-crm/contracts'
 import { useId, useState } from 'react'
 
@@ -21,12 +22,14 @@ import {
   DEAL_FIELD_LABELS,
   LEAD_CLASS_LABELS,
   MATERIAL_LABELS,
+  NOT_SET,
   PREFERRED_CHANNEL_LABELS,
   TASK_KIND_LABELS,
+  assignableUserOptions,
+  buildDealCreateInput,
   formatPhone,
-  toInstantFromKyivInput,
 } from '../model'
-import { emptyFormErrors, phoneFieldError, toFormErrors } from '../validation'
+import { emptyFormErrors, phoneFieldError } from '../validation'
 import { CrmSelectField, CrmTextField, CrmTextareaField } from './CrmField'
 
 /**
@@ -41,11 +44,17 @@ import { CrmSelectField, CrmTextField, CrmTextareaField } from './CrmField'
  * An initial task is optional here even though an open deal is expected to have
  * a next step: the 30-minute grace window (PRD 7.4) exists precisely so the
  * owner can record a lead first and plan the follow-up second.
+ *
+ * «Ответственный» is pre-filled with the current user and then SENT — the server
+ * never infers an owner from the caller's identity — and «Не назначен» stays a
+ * deliberate choice for a lead nobody has picked up yet. The payload is assembled
+ * by `buildDealCreateInput`, which lives in the model because this form renders
+ * inside a Sheet and a portal is a poor place to keep the only copy of a rule.
  */
 
-const NOT_SET = '__not_set__'
-
 export function DealForm({
+  assignableUsers = [],
+  currentUserId,
   existingClient,
   isPending,
   onCancel,
@@ -53,6 +62,9 @@ export function DealForm({
   onSubmit,
   submitError,
 }: {
+  /** Empty while the roster loads, which the parent page has already requested. */
+  assignableUsers?: ReadonlyArray<AssignableUserDto>
+  currentUserId?: string
   existingClient: ClientLookupResponse | undefined
   isPending: boolean
   onCancel: () => void
@@ -68,6 +80,7 @@ export function DealForm({
   const [landingUrl, setLandingUrl] = useState('')
   const [submittedAt, setSubmittedAt] = useState('')
   const [leadClass, setLeadClass] = useState(NOT_SET)
+  const [responsibleUserId, setResponsibleUserId] = useState(currentUserId ?? NOT_SET)
   const [material, setMaterial] = useState(NOT_SET)
   const [areaLabel, setAreaLabel] = useState('')
   const [budgetLabel, setBudgetLabel] = useState('')
@@ -77,7 +90,7 @@ export function DealForm({
   const [potentialAmount, setPotentialAmount] = useState('')
   const [currentNote, setCurrentNote] = useState('')
   const [withTask, setWithTask] = useState(false)
-  const [taskKind, setTaskKind] = useState<string>('CALL')
+  const [taskKind, setTaskKind] = useState<TaskKind>('CALL')
   const [taskTitle, setTaskTitle] = useState('')
   const [taskDueAt, setTaskDueAt] = useState('')
   const [errors, setErrors] = useState(emptyFormErrors)
@@ -87,39 +100,36 @@ export function DealForm({
   const duplicate = existingClient?.client ?? null
 
   const submit = () => {
-    const payload: Record<string, unknown> = {
-      name: name.trim(),
-      phone: phone.trim(),
-      source: source.trim(),
-    }
-    if (form.trim()) payload.form = form.trim()
-    if (landingUrl.trim()) payload.landingUrl = landingUrl.trim()
-    if (submittedAt) payload.submittedAt = toInstantFromKyivInput(submittedAt)
-    if (leadClass !== NOT_SET) payload.leadClass = leadClass
-    if (material !== NOT_SET) payload.material = material
-    if (areaLabel.trim()) payload.areaLabel = areaLabel.trim()
-    if (budgetLabel.trim()) payload.budgetLabel = budgetLabel.trim()
-    if (objectType.trim()) payload.objectType = objectType.trim()
-    if (needTiming.trim()) payload.needTiming = needTiming.trim()
-    if (preferredChannel !== NOT_SET) payload.preferredChannel = preferredChannel
-    if (potentialAmount.trim()) payload.potentialAmount = potentialAmount.trim()
-    if (currentNote.trim()) payload.currentNote = currentNote.trim()
-    if (withTask) {
-      payload.initialTask = {
-        kind: taskKind,
-        title: taskTitle.trim(),
-        dueAt: toInstantFromKyivInput(taskDueAt),
-      }
-    }
+    const built = buildDealCreateInput({
+      name,
+      phone,
+      source,
+      form,
+      landingUrl,
+      submittedAt,
+      leadClass,
+      responsibleUserId,
+      material,
+      areaLabel,
+      budgetLabel,
+      objectType,
+      needTiming,
+      preferredChannel,
+      potentialAmount,
+      currentNote,
+      withTask,
+      taskKind,
+      taskTitle,
+      taskDueAt,
+    })
 
-    const parsed = dealCreateSchema.safeParse(payload)
-    if (!parsed.success) {
-      setErrors(toFormErrors(parsed.error.issues))
+    if (!built.ok) {
+      setErrors(built.errors)
       return
     }
 
     setErrors(emptyFormErrors)
-    onSubmit(parsed.data)
+    onSubmit(built.value)
   }
 
   return (
@@ -249,6 +259,14 @@ export function DealForm({
               type="datetime-local"
               value={submittedAt}
             />
+            <CrmSelectField
+              description="По умолчанию — вы"
+              error={errors.fields.responsibleUserId}
+              label={DEAL_FIELD_LABELS.responsible}
+              onChange={setResponsibleUserId}
+              options={assignableUserOptions(assignableUsers)}
+              value={responsibleUserId}
+            />
           </div>
         </CardContent>
       </Card>
@@ -345,7 +363,7 @@ export function DealForm({
               <div className="grid gap-4 sm:grid-cols-3">
                 <CrmSelectField
                   label="Тип задачи"
-                  onChange={setTaskKind}
+                  onChange={(value) => setTaskKind(taskKindSchema.parse(value))}
                   options={taskKindSchema.options.map((option) => ({
                     label: TASK_KIND_LABELS[option],
                     value: option,
@@ -384,7 +402,7 @@ export function DealForm({
   )
 }
 
-/** Radix `Select` cannot carry an empty value, so "not set" needs a sentinel. */
+/** The «Не задано» entry every optional enum select needs; see `NOT_SET`. */
 function enumOptions<TOption extends string>(
   options: ReadonlyArray<TOption>,
   labels: Record<TOption, string>,

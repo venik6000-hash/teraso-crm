@@ -1,4 +1,5 @@
 import type {
+  AssignableUserDto,
   ClientDetailDto,
   ClientLookupQuery,
   ClientLookupResponse,
@@ -21,9 +22,17 @@ import type {
 import type { AuthenticatedPrincipal } from '../../auth'
 import { CrmFailure } from '../domain/errors'
 import { normalizeUaPhone } from '../domain/phone'
-import { silentLeadNotifier, type Clock, type CrmRepository, type LeadNotifier } from './ports'
+import {
+  silentLeadNotifier,
+  type AssignableUsersReader,
+  type Clock,
+  type CrmRepository,
+  type LeadNotifier,
+} from './ports'
 
 type CrmServiceDependencies = {
+  /** Required, unlike `notifier`; see `AssignableUsersReader` for why. */
+  assignableUsers: AssignableUsersReader
   clock: Clock
   /** Absent means nothing is announced; see `LeadNotifier`. */
   notifier?: LeadNotifier
@@ -63,13 +72,18 @@ const INBOUND_RECEIVED_AT_MAX_FUTURE_MS = 60 * 60 * 1000
 /**
  * Use-case orchestration for clients, deals and their history.
  *
- * Authorization is deliberately "authenticated" and nothing finer. PRD 3 gives
- * the owner full access in the MVP and defers the manager role, so every
- * authenticated principal sees every deal; `responsibleUserId` is stored and
- * filterable so the future role split has the data it needs, but it is not a
- * permission boundary yet. Access is enforced at the API (PRD 10), not the UI:
- * the routes mount `requireAuth`, so an unauthenticated request never reaches
- * this class.
+ * Authorization is "administrator, and nothing finer". PRD 3 gives the owner full
+ * access in the MVP and defers the manager role, so every principal that reaches
+ * this class sees every deal; `responsibleUserId` is stored and filterable so the
+ * future role split has the data it needs, but it is NOT a permission boundary
+ * yet — an actor is not restricted to the deals they are responsible for, which is
+ * why every method takes the actor and none of them filters on it.
+ *
+ * Access is enforced at the API (PRD 10), not the UI: the routes mount
+ * `requireAuth` followed by `requireAdmin`, so neither an anonymous request (401)
+ * nor a signed-in non-administrator (403) ever reaches this class. Registration
+ * hands out the `user` role, so that second guard is what keeps a self-registered
+ * account out of the customer data.
  */
 export class CrmService {
   constructor(private readonly dependencies: CrmServiceDependencies) {}
@@ -152,6 +166,28 @@ export class CrmService {
     return deal
   }
 
+  /**
+   * Erases a deal permanently (PRD 7.1's «удалить заявку»).
+   *
+   * There is no soft-delete flag behind this and no undo in front of it: the
+   * deal, its tasks, its attribution, its ingestion receipts and its append-only
+   * history are gone when this resolves. The interface therefore owns the
+   * confirmation, and the API owns being unambiguous about what it did — hence a
+   * 404 for a deal that was already gone rather than a silent success, which
+   * would let a double-click read as "deleted twice".
+   *
+   * The client record survives; see `eraseDeal` in the repository for why.
+   */
+  async deleteDeal(dealId: string, actor: AuthenticatedPrincipal): Promise<string> {
+    const deleted = await this.dependencies.repository.deleteDeal({
+      dealId,
+      actorUserId: actor.id,
+      now: this.now(),
+    })
+    if (!deleted) throw dealNotFound()
+    return dealId
+  }
+
   async addNote(
     dealId: string,
     input: NoteCreateInput,
@@ -165,6 +201,19 @@ export class CrmService {
     })
     if (!activity) throw dealNotFound()
     return activity
+  }
+
+  /**
+   * The people a deal may be made responsible for (PRD 7.1).
+   *
+   * Read straight through the accounts port, with no filtering here: the port's
+   * whole contract is "the administrators", and re-deciding that in this class
+   * would put the population rule in two places. `_actor` is unused for the same
+   * reason it is unused on the reads above — the guard pair on the route decides
+   * who may ask, and the answer is identical for every administrator.
+   */
+  listAssignableUsers(_actor: AuthenticatedPrincipal): Promise<AssignableUserDto[]> {
+    return this.dependencies.assignableUsers.listAssignableUsers()
   }
 
   async getClient(clientId: string, _actor: AuthenticatedPrincipal): Promise<ClientDetailDto> {

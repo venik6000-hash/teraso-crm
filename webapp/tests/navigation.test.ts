@@ -12,9 +12,23 @@ import {
 
 const DEAL_ID = '11111111-1111-4111-8111-111111111111'
 
-test('the CRM is the product and needs a session, not a particular role', () => {
-  // The seeded account is an administrator, so gating `/app` on `role === user`
-  // locked the only account a fresh deployment has out of the product.
+const CRM_PRODUCT_PATHS = [
+  '/app/dashboard',
+  '/app/deals',
+  '/app/board',
+  '/app/tasks',
+  '/app/notifications',
+  dealPath(DEAL_ID),
+] as const
+
+const CRM_ACCOUNT_PATHS = ['/app', '/app/profile', '/app/settings'] as const
+
+/**
+ * `canOpenWorkspace` answers about a SHELL, not a screen. Both `/app` answers are
+ * true because the account area lives in that shell; the administrator-only half
+ * of `/app` is refused one level down, by `resolveRoleDestination`.
+ */
+test('the workspace question is about the shell, not about the screens inside it', () => {
   expect(canOpenWorkspace('crm', 'admin')).toBe(true)
   expect(canOpenWorkspace('crm', 'user')).toBe(true)
   expect(canOpenWorkspace('admin', 'admin')).toBe(true)
@@ -24,19 +38,44 @@ test('the CRM is the product and needs a session, not a particular role', () => 
   expect(workspaceForPath('/admin/users')).toBe('admin')
 })
 
+/**
+ * The regression guard for the access rule on the client (PRD 3, PRD 10).
+ *
+ * Registration is open and hands out the `user` role, and the CRM API answers 403
+ * to that role. A sidebar that offered those screens anyway would be advertising
+ * refusals, and the guard that let the account walk into them was the interface
+ * half of the same defect.
+ */
+test('a plain account keeps the account area and is refused the CRM product', () => {
+  for (const path of CRM_ACCOUNT_PATHS) {
+    expect(`${path} -> ${resolveRoleDestination('user', path)}`).toBe(`${path} -> ${path}`)
+  }
+  for (const path of CRM_PRODUCT_PATHS) {
+    expect(`${path} -> ${resolveRoleDestination('user', path)}`).toBe(`${path} -> /app`)
+    expect(safeReturnPath('user', path)).toBeNull()
+  }
+})
+
+test('an administrator opens the CRM product, the account area and the console', () => {
+  for (const path of [...CRM_PRODUCT_PATHS, ...CRM_ACCOUNT_PATHS, '/admin', '/admin/users']) {
+    expect(`${path} -> ${resolveRoleDestination('admin', path)}`).toBe(`${path} -> ${path}`)
+  }
+})
+
 test('each workspace lists its own sections and the other one it may open', () => {
-  expect(navigationItemsForWorkspace('crm', 'user')).toEqual([
+  expect(navigationItemsForWorkspace('crm', 'admin')).toEqual([
     { label: 'Дашборд', to: '/app/dashboard' },
     { label: 'Сделки', to: '/app/deals' },
     { label: 'Воронка', to: '/app/board' },
     { label: 'Задачи', to: '/app/tasks' },
     { label: 'Уведомления', to: '/app/notifications' },
     { label: 'Настройки', to: '/app/settings' },
+    { label: 'Администрирование', to: '/admin' },
   ])
-  expect(navigationItemsForWorkspace('crm', 'admin').at(-1)).toEqual({
-    label: 'Администрирование',
-    to: '/admin',
-  })
+  // No links into the product: every one of them would earn a 403.
+  expect(navigationItemsForWorkspace('crm', 'user')).toEqual([
+    { label: 'Настройки', to: '/app/settings' },
+  ])
   expect(navigationItemsForWorkspace('admin', 'admin')).toEqual([
     { label: 'Dashboard', to: '/admin' },
     { label: 'Users', to: '/admin/users' },
@@ -46,29 +85,27 @@ test('each workspace lists its own sections and the other one it may open', () =
 })
 
 /**
- * Every role lands in the CRM, the administrator included.
- *
- * The owner IS the administrator of the only account a Teraso deployment has,
- * and the product they sign in to use is the CRM — leads, the board and today's
- * critical tasks — not user management. `/admin` stays one click away in the
- * sidebar for the rare account change.
+ * Both roles land on `/app`, where it means two different things: the entrance to
+ * the CRM for the owner — who IS the administrator of the only account a Teraso
+ * deployment has — and simply the account home for anybody else.
  */
-test('signing in lands every role in the CRM rather than the account console', () => {
+test('signing in lands every role on the workspace root', () => {
   expect(homePathForRole('user')).toBe('/app')
   expect(homePathForRole('admin')).toBe('/app')
 })
 
 test('destinations outside an account reach resolve to its home', () => {
   expect(resolveRoleDestination('user', '/app/profile')).toBe('/app/profile')
-  expect(resolveRoleDestination('user', '/app/deals')).toBe('/app/deals')
   expect(resolveRoleDestination('user', '/admin/users')).toBe('/app')
+  expect(resolveRoleDestination('user', '/app/unknown')).toBe('/app')
   expect(resolveRoleDestination('admin', '/admin/settings')).toBe('/admin/settings')
-  expect(resolveRoleDestination('admin', '/app/deals')).toBe('/app/deals')
+  expect(resolveRoleDestination('admin', '/app/unknown')).toBe('/app')
 })
 
 test('return paths accept only known internal destinations for the account', () => {
   expect(safeReturnPath('user', '/app/profile')).toBe('/app/profile')
-  expect(safeReturnPath('user', '/app/deals?stage=NEW')).toBe('/app/deals?stage=NEW')
+  expect(safeReturnPath('user', '/app/settings')).toBe('/app/settings')
+  expect(safeReturnPath('admin', '/app/deals?stage=NEW')).toBe('/app/deals?stage=NEW')
   expect(safeReturnPath('admin', '/admin/users?page=2')).toBe('/admin/users?page=2')
   expect(safeReturnPath('user', '/admin')).toBeNull()
   expect(safeReturnPath('admin', 'https://attacker.example/admin')).toBeNull()
@@ -76,11 +113,16 @@ test('return paths accept only known internal destinations for the account', () 
   expect(safeReturnPath('user', '/app/unknown')).toBeNull()
 })
 
-test('a notification deep link survives the sign-in round trip for either role', () => {
-  expect(safeReturnPath('user', dealPath(DEAL_ID))).toBe(dealPath(DEAL_ID))
-  // Notifications are written for every account, so an administrator following
-  // one must land on the deal rather than on the account console.
+/**
+ * A notification links straight at a deal card, and notifications are written for
+ * administrators only — so the round trip has to survive for that role and must
+ * not smuggle a plain account into a deal it cannot open.
+ */
+test('a notification deep link survives the sign-in round trip for an administrator', () => {
   expect(safeReturnPath('admin', dealPath(DEAL_ID))).toBe(dealPath(DEAL_ID))
-  expect(safeReturnPath('user', '/app/deals/not-a-uuid')).toBeNull()
-  expect(safeReturnPath('user', `${dealPath(DEAL_ID)}/extra`)).toBeNull()
+  expect(resolveRoleDestination('admin', dealPath(DEAL_ID))).toBe(dealPath(DEAL_ID))
+  expect(safeReturnPath('user', dealPath(DEAL_ID))).toBeNull()
+  expect(resolveRoleDestination('user', dealPath(DEAL_ID))).toBe('/app')
+  expect(safeReturnPath('admin', '/app/deals/not-a-uuid')).toBeNull()
+  expect(safeReturnPath('admin', `${dealPath(DEAL_ID)}/extra`)).toBeNull()
 })

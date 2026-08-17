@@ -38,11 +38,39 @@ import {
  * board never moved the card: columns render from the server response, so a deal
  * is only ever drawn in the stage the API says it is in.
  *
- * Closing as lost uses `AlertDialog` rather than `Dialog` — it is the
- * destructive, effectively irreversible action of the funnel (reopening is an
- * administrative correction that leaves a permanent record), and PRD 7.0 asks
- * for explicit confirmation of exactly those.
+ * Closing as lost and archiving both use `AlertDialog` rather than `Dialog` —
+ * they are the terminal moves of the funnel, taking a deal off the board in one
+ * gesture, and PRD 7.0 asks for explicit confirmation of exactly those. Neither
+ * is irreversible: reopening is an administrative correction that leaves a
+ * permanent record, and each dialog says so rather than implying finality it
+ * does not have. (The genuinely irreversible action is deletion, which lives on
+ * the card and never on a drag.)
  */
+/**
+ * The two terminal destinations and the words each one confirms with.
+ *
+ * They are worded apart on purpose. A loss is an OUTCOME — it needs a reason and
+ * it feeds the loss breakdown — while an archive is a DECISION ABOUT ATTENTION
+ * and records nothing about why the deal ended. A shared "are you sure?" would
+ * blur exactly the distinction the funnel depends on.
+ */
+const TERMINAL_CONFIRMATIONS = {
+  LOST: {
+    title: 'Закрыть сделку как потерянную?',
+    description:
+      'Сделка перестанет требовать следующего шага и останется в истории клиента. Причина обязательна, комментарий сохранится в ленте.',
+    confirm: 'Закрыть как потерянную',
+    testId: 'mark-lost',
+  },
+  ARCHIVED: {
+    title: 'Убрать сделку в архив?',
+    description:
+      'Сделка уйдёт с доски и перестанет требовать следующего шага. Ничего не удаляется: суммы, задачи и лента событий останутся на месте, найти её можно фильтром «Этап: Архив», а вернуть — кнопкой «Переоткрыть».',
+    confirm: 'В архив',
+    testId: 'mark-archived',
+  },
+} as const
+
 export function StageCommitDialog({
   deal,
   isPending = false,
@@ -77,15 +105,15 @@ export function StageCommitDialog({
     if (!open) onCancel()
   }
 
-  if (stage === 'LOST') {
+  const terminal = TERMINAL_CONFIRMATIONS[stage as 'LOST' | 'ARCHIVED']
+  if (terminal) {
     return (
       <AlertDialog onOpenChange={close} open>
         <AlertDialogContent className="max-h-[85vh] overflow-y-auto">
           <AlertDialogHeader>
-            <AlertDialogTitle>Закрыть сделку как потерянную?</AlertDialogTitle>
+            <AlertDialogTitle>{terminal.title}</AlertDialogTitle>
             <AlertDialogDescription>
-              {`${deal.client.name}. Сделка перестанет требовать следующего шага и останется в
-              истории клиента. Причина обязательна, комментарий сохранится в ленте.`}
+              {`${deal.client.name}. ${terminal.description}`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {fields}
@@ -97,11 +125,12 @@ export function StageCommitDialog({
               message explaining what is missing.
             */}
             <AlertDialogAction
+              data-testid={terminal.testId}
               disabled={isPending}
               onClick={submit}
               onSelect={(event) => event.preventDefault()}
             >
-              Закрыть как потерянную
+              {terminal.confirm}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

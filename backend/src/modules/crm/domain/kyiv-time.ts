@@ -39,18 +39,27 @@ function kyivOffsetMs(instant: Date): number {
 }
 
 /**
- * The UTC instant at which the given Kyiv calendar day begins.
+ * The UTC instant at which a Kyiv wall-clock reading occurred.
  *
- * The offset is applied twice on purpose: the first pass uses the offset at UTC
- * midnight, which lands within a few hours of the answer, and the second uses
- * the offset actually in force at that candidate. One pass would be wrong on a
- * transition day, where UTC midnight and Kyiv midnight sit on opposite sides of
- * the clock change.
+ * `wallClock` is a naive `YYYY-MM-DDTHH:mm:ss` with no zone marker — a reading off
+ * a clock hanging in Kyiv, which is what a server logging `date('Y-m-d H:i:s')` in
+ * that zone writes down.
+ *
+ * The offset is applied twice on purpose: the first pass uses the offset at the
+ * same wall-clock reading interpreted as UTC, which lands within a few hours of
+ * the answer, and the second uses the offset actually in force at that candidate.
+ * One pass would be wrong on a transition day, where the two readings sit on
+ * opposite sides of the clock change.
  */
+export function kyivWallClockToUtc(wallClock: string): Date {
+  const asUtc = Date.parse(`${wallClock}Z`)
+  const firstGuess = asUtc - kyivOffsetMs(new Date(asUtc))
+  return new Date(asUtc - kyivOffsetMs(new Date(firstGuess)))
+}
+
+/** The UTC instant at which the given Kyiv calendar day begins. */
 export function kyivDayStart(isoDate: string): Date {
-  const utcMidnight = Date.parse(`${isoDate}T00:00:00.000Z`)
-  const firstGuess = utcMidnight - kyivOffsetMs(new Date(utcMidnight))
-  return new Date(utcMidnight - kyivOffsetMs(new Date(firstGuess)))
+  return kyivWallClockToUtc(`${isoDate}T00:00:00.000`)
 }
 
 /** The exclusive upper bound of a Kyiv calendar day: the start of the next one. */

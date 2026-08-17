@@ -46,9 +46,25 @@ import { DealBoardCard } from './DealBoardCard'
  * list at `/app/deals` remains the one-handed surface.
  */
 
-/** The loss zone is a drop target, never a column: LOST has no board column. */
-const LOSS_DROP_ID = 'stage:LOST'
 const dropIdFor = (stage: DealStage) => `stage:${stage}`
+
+/**
+ * The two terminal targets. Neither is a column, because neither is a step of
+ * the funnel: a deal that leaves through one of these has stopped moving through
+ * it. They sit below the board as drop zones for exactly that reason.
+ */
+const TERMINAL_DROP_ZONES = [
+  {
+    stage: 'LOST',
+    hint: 'Перетащите сюда, чтобы закрыть сделку без продажи — понадобится причина.',
+    tone: 'ring-destructive',
+  },
+  {
+    stage: 'ARCHIVED',
+    hint: 'Перетащите сюда, чтобы убрать сделку с доски. Данные сохранятся, вернуть можно в любой момент.',
+    tone: 'ring-primary',
+  },
+] as const satisfies ReadonlyArray<{ stage: DealStage; hint: string; tone: string }>
 
 export function DealBoard({
   board,
@@ -101,7 +117,11 @@ export function DealBoard({
           ))}
         </div>
 
-        <LossDropZone />
+        <div className="grid gap-3 sm:grid-cols-2">
+          {TERMINAL_DROP_ZONES.map((zone) => (
+            <TerminalDropZone hint={zone.hint} key={zone.stage} stage={zone.stage} tone={zone.tone} />
+          ))}
+        </div>
       </div>
 
       <DragOverlay>
@@ -206,23 +226,36 @@ function DraggableCard({
 }
 
 /**
- * The loss zone (PRD 7.3): lost deals do not occupy a funnel column, so closing
- * one is a separate target below the board rather than a sixth column that would
- * read as a stage of the funnel.
+ * A terminal drop target (PRD 7.3).
+ *
+ * Lost and archived deals do not occupy funnel columns, so closing or shelving
+ * one is a target below the board rather than an extra column that would read as
+ * a stage of the funnel — and, because FUNNEL_TRANSITIONS is derived from the
+ * column order, would become a reported conversion step as well.
+ *
+ * The two zones share this component rather than each owning a copy: they differ
+ * only in their label, their hint and the colour of the drop ring, and the label
+ * comes from the same `DEAL_STAGE_LABELS` the cards and the filters read.
  */
-function LossDropZone() {
-  const { isOver, setNodeRef } = useDroppable({ id: LOSS_DROP_ID })
+function TerminalDropZone({
+  hint,
+  stage,
+  tone,
+}: {
+  hint: string
+  stage: DealStage
+  tone: string
+}) {
+  const { isOver, setNodeRef } = useDroppable({ id: dropIdFor(stage) })
 
   return (
     <div
-      className={`rounded-xl border border-dashed p-4 text-center ${
-        isOver ? 'ring-2 ring-destructive' : ''
-      }`}
+      className={`rounded-xl border border-dashed p-4 text-center ${isOver ? `ring-2 ${tone}` : ''}`}
       ref={setNodeRef}
     >
-      <Typography variant="control">Потеряна</Typography>
+      <Typography variant="control">{DEAL_STAGE_LABELS[stage]}</Typography>
       <Typography tone="muted" variant="caption">
-        Перетащите сюда, чтобы закрыть сделку без продажи — понадобится причина.
+        {hint}
       </Typography>
     </div>
   )

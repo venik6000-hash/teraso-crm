@@ -33,6 +33,7 @@
     "build:website": "bun run --cwd website build",
     "build:backend": "bun run --cwd backend build",
     "architecture:check": "bun scripts/architecture-check.mjs",
+    "seed:demo": "bun run --cwd backend seed:demo",
     "deploy:do:specs": "bun scripts/prepare-do-specs.mjs",
     "typecheck": "bun run --filter '*' --sequential typecheck",
     "typecheck:webapp": "bun run --cwd webapp typecheck",

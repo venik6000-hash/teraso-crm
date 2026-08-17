@@ -19,7 +19,8 @@ describe('deal criticality', () => {
         stage: 'NEW',
         now: new Date('2026-07-23T10:31:00.000Z'),
         createdAt,
-        activeDueAt: new Date('2026-07-23T10:30:00.000Z'),
+        nearestActiveDueAt: new Date('2026-07-23T10:30:00.000Z'),
+        hasFutureActiveTask: false,
       }).isCritical,
     ).toBe(true)
   })
@@ -29,7 +30,8 @@ describe('deal criticality', () => {
       stage: 'NEW',
       now: new Date('2026-07-23T10:20:00.000Z'),
       createdAt: new Date('2026-07-23T10:00:00.000Z'),
-      activeDueAt: null,
+      nearestActiveDueAt: null,
+      hasFutureActiveTask: false,
     })
 
     expect(state.noNextStep).toBe(true)
@@ -44,7 +46,8 @@ describe('deal criticality', () => {
         stage: 'NEW',
         now: new Date('2026-07-23T10:29:59.999Z'),
         createdAt: fresh,
-        activeDueAt: null,
+        nearestActiveDueAt: null,
+        hasFutureActiveTask: false,
       }).isCritical,
     ).toBe(false)
     expect(
@@ -52,7 +55,8 @@ describe('deal criticality', () => {
         stage: 'NEW',
         now: new Date('2026-07-23T10:30:00.000Z'),
         createdAt: fresh,
-        activeDueAt: null,
+        nearestActiveDueAt: null,
+        hasFutureActiveTask: false,
       }).isCritical,
     ).toBe(true)
   })
@@ -62,28 +66,65 @@ describe('deal criticality', () => {
       stage: 'QUALIFIED',
       now: new Date('2026-07-23T10:00:00.000Z'),
       createdAt,
-      activeDueAt: new Date('2026-07-23T18:00:00.000Z'),
+      nearestActiveDueAt: new Date('2026-07-23T18:00:00.000Z'),
+      hasFutureActiveTask: true,
     })
 
     expect(state).toEqual({ noNextStep: false, hasOverdueTask: false, isCritical: false })
   })
 
+  /**
+   * The state the nearest task alone cannot describe (PRD acceptance 8).
+   *
+   * The earliest active task is overdue, so the deal is late and critical — but a
+   * second active task is booked for the evening, so a next step demonstrably
+   * exists and «Без следующего шага» must not claim otherwise.
+   */
+  test('keeps a next step when an overdue task sits alongside a future one', () => {
+    const state = evaluateDealCriticality({
+      stage: 'QUALIFIED',
+      now: new Date('2026-07-23T10:00:00.000Z'),
+      createdAt,
+      nearestActiveDueAt: new Date('2026-07-22T09:00:00.000Z'),
+      hasFutureActiveTask: true,
+    })
+
+    expect(state).toEqual({ noNextStep: false, hasOverdueTask: true, isCritical: true })
+  })
+
   /** A task due exactly now is already overdue: PRD 7.4 says "at or before now". */
   test('counts a task due exactly now as overdue', () => {
     const now = new Date('2026-07-23T10:00:00.000Z')
-    const state = evaluateDealCriticality({ stage: 'NEW', now, createdAt, activeDueAt: now })
+    const state = evaluateDealCriticality({
+      stage: 'NEW',
+      now,
+      createdAt,
+      nearestActiveDueAt: now,
+      hasFutureActiveTask: false,
+    })
 
     expect(state).toEqual({ noNextStep: true, hasOverdueTask: true, isCritical: true })
   })
 
-  test('exempts won and lost deals from every flag', () => {
-    for (const stage of ['WON', 'LOST'] as const) {
+  test('exempts won, lost and archived deals from every flag', () => {
+    for (const stage of ['WON', 'LOST', 'ARCHIVED'] as const) {
       expect(
         evaluateDealCriticality({
           stage,
           now: new Date('2026-07-24T10:00:00.000Z'),
           createdAt,
-          activeDueAt: new Date('2026-07-23T08:00:00.000Z'),
+          nearestActiveDueAt: new Date('2026-07-23T08:00:00.000Z'),
+          hasFutureActiveTask: false,
+        }),
+      ).toEqual({ noNextStep: false, hasOverdueTask: false, isCritical: false })
+      // A closed deal still carrying a future task is exempt just the same.
+      expect(
+        evaluateDealCriticality({
+          stage,
+          now: new Date('2026-07-24T10:00:00.000Z'),
+          createdAt,
+          nearestActiveDueAt: new Date('2026-07-25T08:00:00.000Z'),
+          hasFutureActiveTask: true,
         }),
       ).toEqual({ noNextStep: false, hasOverdueTask: false, isCritical: false })
     }
@@ -96,9 +137,20 @@ describe('deal criticality', () => {
           stage,
           now: new Date('2026-07-24T10:00:00.000Z'),
           createdAt,
-          activeDueAt: null,
+          nearestActiveDueAt: null,
+          hasFutureActiveTask: false,
         }),
       ).toEqual({ noNextStep: true, hasOverdueTask: false, isCritical: true })
+      // And to the two-task state, in every open stage.
+      expect(
+        evaluateDealCriticality({
+          stage,
+          now: new Date('2026-07-24T10:00:00.000Z'),
+          createdAt,
+          nearestActiveDueAt: createdAt,
+          hasFutureActiveTask: true,
+        }),
+      ).toEqual({ noNextStep: false, hasOverdueTask: true, isCritical: true })
     }
   })
 })
@@ -191,9 +243,46 @@ describe('stage transitions', () => {
     }
   })
 
-  test('reopens a won or lost deal back to a new deal', () => {
+  test('reopens a won, lost or archived deal back to a new deal', () => {
     expect(validateStageChange({ from: 'WON', to: 'NEW' })).toEqual({ kind: 'reopen' })
     expect(validateStageChange({ from: 'LOST', to: 'NEW' })).toEqual({ kind: 'reopen' })
+    expect(validateStageChange({ from: 'ARCHIVED', to: 'NEW' })).toEqual({ kind: 'reopen' })
+  })
+
+  /**
+   * The archive takes a deal from ANY stage, including the two closed ones, and
+   * that breadth is the point: it is the shelf for everything that should stop
+   * occupying attention — a dead lead nobody wants to name a loss reason for, a
+   * won job finished last season, a lost one already explained.
+   *
+   * It is deliberately NOT a loss: no reason is asked for and none is recorded,
+   * so archiving cannot quietly pollute the loss-reason breakdown.
+   */
+  test('archives a deal from every stage but the archive itself', () => {
+    for (const from of [...openStages, 'WON', 'LOST'] as const) {
+      expect(validateStageChange({ from, to: 'ARCHIVED' })).toEqual({ kind: 'archive' })
+    }
+  })
+
+  /**
+   * A deal leaves the archive only by being reopened. Letting it slide sideways
+   * into a mid-funnel stage would manufacture a STAGE_CHANGED pair the dashboard
+   * counts as a conversion, turning shelf-clearing into reported sales movement.
+   */
+  test('lets nothing but a reopen out of the archive', () => {
+    for (const to of ['QUALIFIED', 'PROPOSAL_SENT', 'PREPAYMENT', 'WON', 'LOST', 'ARCHIVED'] as const) {
+      expect(() =>
+        validateStageChange({
+          from: 'ARCHIVED',
+          to,
+          prepaymentAmount: '1000',
+          prepaymentPaidAt: paidAt,
+          fullPaymentAmount: '5000',
+          fullPaymentPaidAt: paidAt,
+          lossReason: 'NO_ANSWER',
+        }),
+      ).toThrow('Недопустимый переход')
+    }
   })
 
   test('rejects skips, backward moves and edits of a closed deal', () => {

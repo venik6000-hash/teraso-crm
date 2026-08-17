@@ -13,6 +13,12 @@ type CreateNotificationsModuleOptions = {
   backgroundTasks: TaskDeferrer
   clock?: Clock
   db: DbClient
+  /**
+   * The role half of the guard on this router (PRD 3). Notifications carry client
+   * names, so the inbox is only useful — and only permitted — to the accounts that
+   * may open the CRM at all.
+   */
+  requireAdmin: MiddlewareHandler<AuthHttpEnv>
   requireAuth: MiddlewareHandler<AuthHttpEnv>
   /** Operator dial; see NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES in env.ts. */
   taskOverdueAfterMinutes?: number
@@ -39,6 +45,7 @@ export function createNotificationsModule({
   backgroundTasks,
   clock = systemClock,
   db,
+  requireAdmin,
   requireAuth,
   taskOverdueAfterMinutes,
   vapid,
@@ -54,7 +61,12 @@ export function createNotificationsModule({
   return {
     service,
     leadNotifier: createLeadNotifier(service),
-    routes: createNotificationRoutes({ requireAuth, service, vapidPublicKey: vapid?.publicKey }),
+    routes: createNotificationRoutes({
+      requireAdmin,
+      requireAuth,
+      service,
+      vapidPublicKey: vapid?.publicKey,
+    }),
   }
 }
 

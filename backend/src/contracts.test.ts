@@ -96,5 +96,9 @@ describe('CRM stage constants against the PostgreSQL enum', () => {
     expect(OPEN_DEAL_STAGES).not.toContain(DealStage.WON)
     expect(OPEN_DEAL_STAGES).not.toContain(DealStage.LOST)
     expect(ACTIVE_DEAL_STAGES).not.toContain(DealStage.LOST)
+    // The archive is terminal and off the board: inside either set it would
+    // start demanding a next step or claim a funnel column of its own.
+    expect(OPEN_DEAL_STAGES).not.toContain(DealStage.ARCHIVED)
+    expect(ACTIVE_DEAL_STAGES).not.toContain(DealStage.ARCHIVED)
   })
 })

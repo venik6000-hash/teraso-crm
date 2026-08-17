@@ -13,17 +13,24 @@ test('keeps user and administrator workspaces separate', async ({ browser, page 
   await page.getByRole('button', { name: 'Create Account' }).click()
 
   await expect(page).toHaveURL(/\/app$/)
-  await expect(page.getByRole('link', { name: 'Сделки' })).toBeVisible()
+  // A registered account gets the account area only: the CRM product and the
+  // account console both ask for an administrator (PRD 3), and the API refuses
+  // their data with 403, so neither is offered here.
+  await expect(page.getByRole('link', { name: 'Настройки' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Сделки' })).toHaveCount(0)
   await expect(page.getByRole('link', { name: 'Dashboard' })).toHaveCount(0)
   const sidebar = page.locator('[data-slot="sidebar"][data-state]')
   await expect(sidebar).toHaveAttribute('data-state', 'expanded')
   await page.locator('[data-sidebar="trigger"]').click()
   await expect(sidebar).toHaveAttribute('data-state', 'collapsed')
-  await page.getByRole('link', { name: 'Сделки' }).click()
-  await expect(page).toHaveURL(/\/app\/deals$/)
+  await page.getByRole('link', { name: 'Настройки' }).click()
+  await expect(page).toHaveURL(/\/app\/settings$/)
   await expect(sidebar).toHaveAttribute('data-state', 'collapsed')
   await page.reload()
   await expect(sidebar).toHaveAttribute('data-state', 'collapsed')
+  // Typing the URL is refused too, not merely unlinked.
+  await page.goto('/app/deals')
+  await expect(page).toHaveURL(/\/app$/)
   await page.goto('/admin/users')
   await expect(page).toHaveURL(/\/app$/)
 
@@ -44,9 +51,9 @@ test('keeps user and administrator workspaces separate', async ({ browser, page 
   await expect(adminPage.getByRole('link', { name: 'Users' })).toBeVisible()
   await expect(adminPage.getByRole('link', { name: 'Settings' })).toBeVisible()
   await expect(adminPage.getByRole('link', { name: 'Home' })).toHaveCount(0)
-  // The CRM is the product and asks only for a session: the seeded
-  // administrator must be able to open it, because it is the only account a
-  // fresh deployment has and every notification links into it.
+  // The CRM is the product and it is the administrator's: the seeded account is
+  // the only one a fresh deployment has, it is the one every notification is
+  // written for, and the deal cards those notifications link at are its own.
   await adminPage.getByRole('link', { name: 'CRM', exact: true }).click()
   await expect(adminPage).toHaveURL(/\/app\/deals$/)
   await expect(adminPage.getByRole('heading', { level: 1, name: 'Сделки' })).toBeVisible()
@@ -68,9 +75,12 @@ test('mobile workspace navigation closes the sidebar sheet', async ({ page }) =>
   await page.locator('[data-sidebar="trigger"]').click()
   const mobileSidebar = page.locator('[data-slot="sidebar"][data-mobile="true"]')
   await expect(mobileSidebar).toBeVisible()
-  await page.getByRole('link', { name: 'Сделки' }).click()
+  // «Настройки» rather than a CRM section: this account is not an administrator,
+  // so the account area is the whole of its sidebar. The sheet behaviour under
+  // test is the same either way.
+  await page.getByRole('link', { name: 'Настройки' }).click()
 
-  await expect(page).toHaveURL(/\/app\/deals$/)
+  await expect(page).toHaveURL(/\/app\/settings$/)
   await expect(mobileSidebar).toBeHidden()
 })
 
@@ -270,9 +280,11 @@ test('promoting a user revokes the old session and opens the admin workspace aft
   await expect(page.getByRole('button', { name: 'Login' })).toBeVisible()
   await signIn(page, userEmail, e2ePassword)
 
-  // A freshly promoted administrator lands in the CRM like any other account,
-  // and the account console is now reachable from its sidebar.
+  // Promotion is what opens the product: the same account now lands on `/app` with
+  // the CRM sections and a link into the account console, where a moment ago it had
+  // only «Настройки».
   await expect(page).toHaveURL(/\/app$/)
+  await expect(page.getByRole('link', { name: 'Сделки' })).toBeVisible()
   await openAdminWorkspace(page)
   await expect(page.getByRole('link', { name: 'Dashboard' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Home' })).toHaveCount(0)
@@ -326,9 +338,9 @@ async function signIn(page: Page, email: string, password: string) {
 /**
  * Crosses from the CRM into the account console.
  *
- * Every account, administrators included, lands in the CRM after signing in, so
- * the console is reached through the sidebar. Waiting for the landing URL first
- * keeps the click from racing the redirect that follows login.
+ * Every account lands on `/app` after signing in, and for an administrator that is
+ * the CRM, so the console is reached through the sidebar. Waiting for the landing
+ * URL first keeps the click from racing the redirect that follows login.
  */
 async function openAdminWorkspace(page: Page) {
   const link = page.getByRole('link', { name: 'Администрирование' })

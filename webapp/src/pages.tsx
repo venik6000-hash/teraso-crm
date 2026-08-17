@@ -29,8 +29,8 @@ import {
   DEAL_DETAIL_ROUTE_PATH,
 } from '@/features/crm'
 import {
-  canOpenWorkspace,
   homePathForRole,
+  resolveRoleDestination,
   safeReturnPath,
   type WorkspaceKind,
 } from '@/features/navigation'
@@ -181,11 +181,18 @@ export function NotFoundPage() {
 }
 
 /**
- * The guard is per workspace, not per role: the CRM asks only for a signed-in
- * account, the account console still asks for an administrator. Gating `/app`
- * on `role === 'user'` locked the seeded administrator — the only account a
- * fresh deployment has — out of the product, and made every notification link
- * it receives a dead one.
+ * The guard is per PATH, not per workspace, because one `/app` layout serves two
+ * different things: the administrator-only CRM product and the account area every
+ * signed-in account keeps (`/app`, `/app/profile`, `/app/settings`). Asking only
+ * for a session — which is what a workspace-level guard could ask — let any
+ * self-registered account open every client name and deal amount in the CRM;
+ * asking for `role === 'admin'` across the whole layout would instead lock a plain
+ * account out of its own profile.
+ *
+ * `resolveRoleDestination` owns that decision, so this component states no rule of
+ * its own: a permitted path comes back unchanged, anything else comes back as the
+ * account's home and is redirected there. The backend refuses the same paths with
+ * 403 (PRD 10), so this only saves the round trip — it is not the enforcement.
  */
 function WorkspaceRoute({ workspace }: { workspace: WorkspaceKind }) {
   const auth = useAuth()
@@ -199,9 +206,8 @@ function WorkspaceRoute({ workspace }: { workspace: WorkspaceKind }) {
     const returnTo = `${location.pathname}${location.searchStr}`
     return <HrefRedirect href={`/login?returnTo=${encodeURIComponent(returnTo)}`} />
   }
-  if (!canOpenWorkspace(workspace, auth.user.role)) {
-    return <HrefRedirect href={homePathForRole(auth.user.role)} />
-  }
+  const destination = resolveRoleDestination(auth.user.role, location.pathname)
+  if (destination !== location.pathname) return <HrefRedirect href={destination} />
 
   return (
     <WorkspaceShell onLogout={auth.logout} user={auth.user} workspace={workspace}>

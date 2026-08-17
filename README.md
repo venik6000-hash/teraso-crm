@@ -14,8 +14,8 @@ This repository was initialized from the [Vibe Coding Template](https://github.c
 - Deployment is outside MVP. No cloud account setup, no production secrets, and no remote Git publication are in scope. `.do/` specs and `docs/DEPLOYMENT.md` stay committed for a later release decision.
 - Validation scope for the active surfaces: `bun run test:contracts`, `bun run architecture:check`, `bun run test:deploy`, `bun run test:backend`, `bun run test:webapp`, and `bun run typecheck`. `test:deploy` is the only suite covering `scripts/repo-env.test.mjs` and `scripts/architecture-check.test.mjs`, and CI runs it.
 - Business rules that apply repository-wide: all UI copy, stage labels, task types, loss reasons, and validation feedback are in Russian; the business time zone is Europe/Kyiv; money is stored as PostgreSQL `Decimal(14,2)` and exposed as decimal strings in UAH.
-- The normal CRM interface never deletes a client, deal, task, or timeline entry. Deals leave the funnel by being closed as won or lost and their history stays. There is no delete endpoint for those records, and `ON DELETE RESTRICT` on `deal_activities` and `ingestion_receipts` makes a direct database deletion fail loudly. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
-- Every role, including administrator, lands on `/app` after signing in. The owner is the administrator of the only account a Teraso deployment has, and the CRM is the daily surface; `/admin` stays reachable from the sidebar for the rare account change.
+- A deal leaves the working funnel in one of two ways, and they are not interchangeable. **«Архив»** is the reversible one: the deal leaves the board and stops demanding a next step, while its amounts, tasks and timeline stay put, it remains findable by the «Этап: Архив» filter, and «Переоткрыть» returns it to «Новая заявка». It is deliberately neither a board column nor a funnel step, so archiving never shifts a conversion rate or a reported period's revenue. **«Удалить»** is the irreversible one and the only destructive action in the product: `DELETE /api/crm/deals/{dealId}` erases the deal, its tasks, its attribution, its ingestion receipts and its whole timeline, which also removes its payments from the dashboard and frees its `[source, externalId]` so a re-delivered lead would arrive as new. The client record always survives. Clients, and tasks or timeline entries on their own, still have no delete endpoint at all, and `ON DELETE RESTRICT` on `deal_activities` and `ingestion_receipts` still makes every *other* deletion path fail loudly — the delete endpoint steps through it explicitly inside one transaction. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
+- The CRM product surface is administrator-only; the account area is not. Deals, the funnel, tasks, the dashboard, deal cards and notifications require the `admin` role, enforced at the API with `requireAdmin` (a signed-in `user` gets `403`) and not only in the interface, which does not offer those sections. `/app`, `/app/profile` and `/app/settings` stay open to any signed-in account. Every role therefore lands on `/app` after signing in, but that means two different things: for the owner — the administrator of the only account a Teraso deployment really has — it is the entrance to the CRM, with `/admin` one click away in the sidebar for the rare account change; for anybody else it is the whole of what they can open.
 - The dashboard's «Задач на сегодня» and «Просроченных задач» tiles count tasks (PRD 7.8) and link to `/app/tasks`. One deal can carry several tasks, so a deal-filtered list would show a different number from the one that was clicked.
 - `backend/.env` and `webapp/.env` are local-only files created from their `.env.example` siblings. They are gitignored and must never be committed.
 
@@ -92,9 +92,10 @@ bun run --cwd backend prisma:generate
 bun run --cwd backend prisma:deploy
 ```
 
-Registration always creates the `user` role. To make the local
-administrator usable, set `ADMIN_SEED_PASSWORD` in `backend/.env`, then run the
-idempotent seed:
+Registration always creates the `user` role, and the CRM needs `admin`, so a
+self-registered local account can open only its own profile and settings. The
+seeded administrator is what opens the product. To make it usable, set
+`ADMIN_SEED_PASSWORD` in `backend/.env`, then run the idempotent seed:
 
 ```bash
 bun run --cwd backend prisma:seed
@@ -157,6 +158,7 @@ VITE_API_URL=http://localhost:3000
 - `bun run --cwd backend prisma:migrate` - create/apply a Prisma migration in development.
 - `bun run --cwd backend prisma:deploy` - apply existing Prisma migrations on a server.
 - `bun run --cwd backend prisma:seed` - idempotently create or unlock the local administrator.
+- `bun run seed:demo` - fill the local database with ten fictional leads and the history around them, so every screen has something to show. It writes through the real ingestion path and CRM services, is idempotent (a second run adds nothing), refuses to run with `NODE_ENV=production`, and creates two credential-less colleague accounts so the «ответственный» picker has people in it.
 - `bun run --cwd backend db:deploy` - production pre-deploy: migrate, optionally bootstrap the first administrator, and require a login-capable administrator.
 
 ## Project READMEs

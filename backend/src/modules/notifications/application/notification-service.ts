@@ -96,11 +96,12 @@ export type DispatchSummary = {
  *    the `[recipientUserId, eventKey]` unique index make the run idempotent and
  *    safe to overlap itself.
  *
- * Authorization is «authenticated, and only your own rows». Unlike the CRM
- * context, where PRD 3 gives every authenticated principal every deal, a
- * notification and a push endpoint belong to exactly one person: each method
- * scopes on the actor's own id, and the repository takes that id as its first
- * argument so it cannot be forgotten.
+ * Authorization is «administrator, and only your own rows». The router asks for an
+ * administrator, as the CRM router does, because these bodies carry client names
+ * (PRD 3). Beyond that the scoping is narrower than the CRM's: where an
+ * administrator sees every deal, a notification and a push endpoint belong to
+ * exactly one person, so each method scopes on the actor's own id and the
+ * repository takes that id as its first argument so it cannot be forgotten.
  */
 export class NotificationService {
   constructor(private readonly dependencies: NotificationServiceDependencies) {}
@@ -410,14 +411,15 @@ export class NotificationService {
    * deal then stays bare.
    *
    * "No task at all" is narrower than the list/board's `noNextStep`, deliberately.
-   * That flag means "no task in the FUTURE", which is also true of a deal whose
-   * task is merely overdue — correct for a filter offering «Без следующего шага»,
-   * but wrong here twice over: it would tell the owner «30 минут без задачи» about
-   * a deal that demonstrably has one, and it would fire alongside TASK_DUE for
-   * every inbound lead, since the auto-task comes due exactly when the grace window
-   * closes. Selecting on "no active task" instead makes the three conditions
-   * disjoint — the moment arrived, the moment passed, there is nothing scheduled —
-   * so an inbound lead raises one alert and the sentence is true when it does.
+   * That flag means "no ACTIVE task in the FUTURE", which is still true of a deal
+   * whose only task is already overdue — correct for a filter offering «Без
+   * следующего шага», but wrong here twice over: it would tell the owner «30 минут
+   * без задачи» about a deal that demonstrably has one, and it would fire alongside
+   * TASK_DUE for every inbound lead, since the auto-task comes due exactly when the
+   * grace window closes. Selecting on "no active task whatsoever" instead makes the
+   * three conditions disjoint — the moment arrived, the moment passed, there is
+   * nothing scheduled — so an inbound lead raises one alert and the sentence is
+   * true when it does.
    */
   private leadRecords(
     lead: LeadNeedsActionCondition,
@@ -447,13 +449,18 @@ export class NotificationService {
 }
 
 /**
- * Whoever owns the work, or everyone when nobody does. An inbound lead arrives
- * with neither a responsible user nor an assignee (Task 5 creates both as null),
- * so «notify the owner only» would leave the single most urgent event in the
- * product notifying nobody at all.
+ * Whoever owns the work, or every administrator when nobody does. An inbound lead
+ * arrives with neither a responsible user nor an assignee (Task 5 creates both as
+ * null), so «notify the owner only» would leave the single most urgent event in
+ * the product notifying nobody at all.
+ *
+ * The fallback is deliberately the administrators rather than every account: the
+ * repository's `listRecipientUserIds` filters on the role, because these bodies
+ * carry client names and the CRM those names belong to is administrator-only
+ * (PRD 3).
  */
-function resolveRecipients(ownerUserId: string | null, everyone: string[]): string[] {
-  return ownerUserId ? [ownerUserId] : everyone
+function resolveRecipients(ownerUserId: string | null, administrators: string[]): string[] {
+  return ownerUserId ? [ownerUserId] : administrators
 }
 
 /**

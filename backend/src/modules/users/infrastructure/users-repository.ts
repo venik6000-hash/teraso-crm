@@ -1,6 +1,7 @@
 import type {
   AdminUserSummary,
   AdminUsersQuery,
+  AssignableUserDto,
   UserRole,
 } from '@teraso-crm/contracts'
 import { ADMIN_USERS_MAX_PAGE } from '@teraso-crm/contracts'
@@ -14,6 +15,7 @@ import {
 import type {
   AdminDashboardReader,
   AdminUsersReader,
+  AssignableUsersReader,
   ProfileWriter,
   UserRoleUpdater,
 } from '../application/ports'
@@ -31,6 +33,7 @@ type UsersRepository =
   & ProfileWriter
   & AdminDashboardReader
   & AdminUsersReader
+  & AssignableUsersReader
   & UserRoleUpdater
 
 export function createPrismaUsersRepository(db: DbClient): UsersRepository {
@@ -78,6 +81,29 @@ export function createPrismaUsersRepository(db: DbClient): UsersRepository {
         total,
         hasNext: page < ADMIN_USERS_MAX_PAGE && page * pageSize < total,
       }
+    },
+
+    /**
+     * The administrators another context may hand a record to.
+     *
+     * Filtered on the role, not paged and not searched: this answers a select, so
+     * a page 2 the picker would never request is worse than no paging at all.
+     * `users_role_idx` covers the filter, the same index the notification
+     * recipient scan relies on.
+     *
+     * Ordered oldest account first, matching that scan, rather than
+     * alphabetically: the displayed value falls back to the email, so no single
+     * column sort matches what the owner actually reads, and inventing one in SQL
+     * would only look sorted. `id` breaks ties so two accounts created in the same
+     * millisecond stay stably ordered.
+     */
+    async listAssignableUsers() {
+      const admins = await db.user.findMany({
+        where: { role: 'admin' },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: { id: true, displayName: true, email: true },
+      })
+      return admins.map(toAssignableUser)
     },
 
     updateRole(input) {
@@ -131,6 +157,20 @@ export function createPrismaUsersRepository(db: DbClient): UsersRepository {
       }, userAuthorityTransitionTransactionOptions)
     },
   }
+}
+
+/**
+ * The picker's display value, resolved exactly as the CRM resolves
+ * `responsibleName` and `assigneeName`: the display name, falling back to the
+ * account email. Both sides landing on the same string is what keeps the form and
+ * the card from naming one person two ways.
+ */
+function toAssignableUser(user: {
+  id: string
+  displayName: string | null
+  email: string
+}): AssignableUserDto {
+  return { id: user.id, name: user.displayName ?? user.email }
 }
 
 function toAdminUserSummary(user: {

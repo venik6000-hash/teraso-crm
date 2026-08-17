@@ -271,6 +271,52 @@ maybeDescribe('inbound quiz webhook ingestion', () => {
     expect(secondReceipt.source).toBe('Повторный визит')
   })
 
+  /**
+   * What the customer typed is the one part of a lead a manager cannot reconstruct
+   * from the structured fields — «потрібна невелика (1,5-2 м.кв.) кількість
+   * термоясеня (20х95) (у Львові)» is the whole job. It goes onto the timeline as
+   * the text of the «Заявка получена» event, where the append-only log keeps it
+   * exactly as it arrived.
+   */
+  test('the customer’s own message is kept as the text of the inbound event', async () => {
+    const note = 'Потрібна невелика (1,5-2 м.кв.) кількість термоясеня (20х95) (у Львові)'
+    const { result } = await ingestOk(leadPayload({ externalId: 'lead_note_1', note }))
+
+    const inbound = await prisma.dealActivity.findFirstOrThrow({
+      where: { dealId: result.dealId, kind: 'INBOUND_LEAD_RECEIVED' },
+    })
+    expect(inbound.text).toBe(note)
+    expect(inbound.authorUserId).toBeNull()
+  })
+
+  test('a lead without a message leaves the inbound event’s text null', async () => {
+    const { result } = await ingestOk(leadPayload({ externalId: 'lead_note_2' }))
+
+    const inbound = await prisma.dealActivity.findFirstOrThrow({
+      where: { dealId: result.dealId, kind: 'INBOUND_LEAD_RECEIVED' },
+    })
+    expect(inbound.text).toBeNull()
+  })
+
+  /**
+   * A second submission on an open deal is the case where the message matters most:
+   * the deal already exists, so the new text is the only thing the delivery adds.
+   */
+  test('a message on a second submission lands on the open deal’s new event', async () => {
+    const first = await ingestOk(leadPayload({ externalId: 'lead_note_open_1' }))
+    const note = 'Передзвоніть після 18:00, будь ласка'
+    const second = await ingestOk(leadPayload({ externalId: 'lead_note_open_2', note }))
+
+    expect(second.result.status).toBe('attached-to-open-deal')
+    const events = await prisma.dealActivity.findMany({
+      where: { dealId: first.result.dealId, kind: 'INBOUND_LEAD_RECEIVED' },
+      orderBy: { createdAt: 'asc' },
+    })
+    expect(events).toHaveLength(2)
+    expect(events[0]!.text).toBeNull()
+    expect(events[1]!.text).toBe(note)
+  })
+
   test('an existing client with no open deal gets a brand new deal and its own auto-task', async () => {
     const first = await ingestOk(leadPayload({ externalId: 'lead_closed_1' }))
     // Close the only deal, so the client now has no open deal.
@@ -331,4 +377,66 @@ maybeDescribe('inbound quiz webhook ingestion', () => {
     expect(responses.every((response) => response.status === 200 || response.status === 201)).toBe(true)
     expect(await prisma.client.count()).toBe(1)
   })
+
+  /**
+   * Deleting an ingested lead, and the consequence that deserves stating.
+   *
+   * `(source, externalId)` is the webhook's idempotency identity and it lives on
+   * IngestionReceipt, which is declared `onDelete: Restrict` alongside the
+   * activity log. A permanent deletion has to take it — a receipt pointing at a
+   * deal that no longer exists is a dangling row — and taking it means the CRM
+   * forgets it ever saw that lead.
+   *
+   * So a later re-delivery arrives as new. That is the honest outcome rather
+   * than a leak: nothing in the CRM records that lead any more, and the site's
+   * own retries land within minutes, long before anybody deletes a deal by hand.
+   * This test exists to make the behaviour deliberate instead of discovered.
+   */
+  test('erasing an ingested deal takes its receipt and attribution, so a later delivery is a new lead', async () => {
+    const payload = leadPayload({ externalId: 'lead_to_erase' })
+    const { result } = await ingestOk(payload)
+
+    expect(await prisma.ingestionReceipt.count()).toBe(1)
+    expect(await prisma.leadAttribution.count({ where: { dealId: result.dealId } })).toBe(1)
+
+    const token = await administratorToken()
+    const deleted = await app.request(`/api/crm/deals/${result.dealId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(deleted.status).toBe(200)
+
+    expect(await prisma.deal.count()).toBe(0)
+    expect(await prisma.ingestionReceipt.count()).toBe(0)
+    expect(await prisma.leadAttribution.count()).toBe(0)
+    // The client outlives the deal, so the number stays known to the CRM.
+    expect(await prisma.client.count()).toBe(1)
+
+    /**
+     * The same identity is free again, so the site can deliver this lead anew —
+     * and it lands as `new-deal-for-existing-client` rather than `created`,
+     * which is the two halves of this feature meeting: the receipt was erased
+     * with the deal, the client was not, so the returning lead is recognized as
+     * a known number rather than a stranger.
+     */
+    const redelivered = await ingestOk(payload)
+    expect(redelivered.result.status).toBe('new-deal-for-existing-client')
+    expect(redelivered.result.dealId).not.toBe(result.dealId)
+    expect(redelivered.result.clientId).toBe(result.clientId)
+    expect(await prisma.deal.count()).toBe(1)
+    expect(await prisma.client.count()).toBe(1)
+  })
+
+  /** Registers an account and promotes it: the CRM API is administrator-only. */
+  async function administratorToken(): Promise<string> {
+    const response = await app.request('/api/auth/token/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'owner@teraso.com.ua', password: 'password123' }),
+    })
+    expect(response.status).toBe(201)
+    const session = (await response.json()) as { accessToken: string; user: { id: string } }
+    await prisma.user.update({ where: { id: session.user.id }, data: { role: 'admin' } })
+    return session.accessToken
+  }
 })

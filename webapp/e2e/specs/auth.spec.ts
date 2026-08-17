@@ -39,9 +39,14 @@ test('registers, restores the session, opens protected UI, and logs out', async 
   await expect(page.getByRole('main')).toHaveCount(1)
   await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible()
   await expect(page.getByRole('heading', { level: 1, name: `Welcome, ${displayName}` })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Сделки' })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Задачи' })).toBeVisible()
+  // Registration is open and creates the `user` role, and the CRM product is the
+  // руководитель's alone (PRD 3) — the API answers 403 to every screen behind
+  // these labels. So a freshly registered account is offered its account area and
+  // nothing else: no CRM links, and no account console either.
   await expect(page.getByRole('link', { name: 'Настройки' })).toBeVisible()
+  for (const section of ['Сделки', 'Задачи', 'Дашборд', 'Воронка', 'Уведомления']) {
+    await expect(page.getByRole('link', { name: section })).toHaveCount(0)
+  }
   await expect(page.getByRole('link', { name: 'Dashboard' })).toHaveCount(0)
   await expect(page.getByRole('link', { name: 'Users' })).toHaveCount(0)
   await expect(page.getByRole('main').getByText(email, { exact: true })).toBeVisible()

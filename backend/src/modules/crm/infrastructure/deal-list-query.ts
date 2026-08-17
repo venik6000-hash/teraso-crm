@@ -72,9 +72,12 @@ export const nearestActiveTaskLateral = Prisma.sql`
  * integration test covers every surface rather than only the one it was written
  * against.
  *
- * They read two aliases from the surrounding query — `d` for the deal row and
- * `nearest_task` for `nearestActiveTaskLateral` — so any caller must join that
- * lateral. `dealUrgencyFrom` below is the canonical FROM clause that does.
+ * Aliases they read from the surrounding query: every predicate reads `d`, the
+ * deal row. `overdueTaskSql` additionally reads `nearest_task` from
+ * `nearestActiveTaskLateral`, and `criticalDealSql` composes that predicate — so
+ * those two require the lateral to be joined, while `isOpenDealSql` and
+ * `noNextStepSql` stand on `d` alone. `dealUrgencyFrom` below is the canonical
+ * FROM clause that joins it.
  * ------------------------------------------------------------------ */
 
 /** Stages still expected to carry a next step; WON and LOST are exempt. */
@@ -85,9 +88,24 @@ export function overdueTaskSql(now: Date): Prisma.Sql {
   return Prisma.sql`nearest_task.due_at IS NOT NULL AND nearest_task.due_at <= ${now}`
 }
 
-/** No active task remains in the future. */
+/**
+ * No active task remains in the future.
+ *
+ * Deliberately NOT read off `nearest_task`, for the same reason `dueToday` below
+ * scans the tasks instead of the lateral: the minimum due time answers "is
+ * something already due", not "is anything still ahead". A deal carrying a call
+ * overdue since yesterday AND a measurement booked for next Tuesday has its
+ * nearest task in the past while a next step demonstrably exists, so this asks
+ * the deal's active tasks directly — matching `hasFutureActiveTask` in
+ * `evaluateDealCriticality`.
+ */
 export function noNextStepSql(now: Date): Prisma.Sql {
-  return Prisma.sql`(nearest_task.due_at IS NULL OR nearest_task.due_at <= ${now})`
+  return Prisma.sql`NOT EXISTS (
+    SELECT 1 FROM deal_tasks t
+    WHERE t.deal_id = d.id
+      AND t.status = 'ACTIVE'::task_status
+      AND t.due_at > ${now}
+  )`
 }
 
 /**

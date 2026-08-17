@@ -130,6 +130,49 @@ test('quiz lead reaches success', async ({ page }) => {
   await page.goto(`/app/deals?q=${encodeURIComponent(phone)}`)
   await expect(page.getByTestId(`deal-row-${dealId}`)).toHaveCount(1)
   await expect(page.getByRole('main').getByText('Олена Ковальчук')).toHaveCount(1)
+
+  /*
+   * The archive: a won deal is shelved once the job is finished.
+   *
+   * It leaves the board and stops being worked, but nothing about it is lost —
+   * and the revenue it earned stays in the report, because received money is
+   * attributed by its own payment date rather than by the deal's stage. That
+   * distinction is the whole reason the archive exists next to deletion.
+   */
+  await page.goto(`/app/deals/${dealId}`)
+  await openStageDialog(page, 'Архив')
+  await page.getByRole('button', { name: 'Сохранить этап' }).click()
+  await expect(page.getByRole('main')).toContainText('Архив')
+  // Closed, so it offers the way back — from the archive exactly as from a loss.
+  await expect(page.getByRole('button', { name: 'Переоткрыть' })).toBeVisible()
+
+  // The board carries no archive column, so the card is simply not on it.
+  await page.goto('/app/board')
+  await expect(page.getByTestId(`deal-row-${dealId}`)).toHaveCount(0)
+
+  await page.goto('/app/dashboard')
+  await expect(page.getByTestId('dashboard-won-amount')).toContainText('80 000')
+
+  /* Still findable — «в архив» is not «удалить». */
+  await page.goto('/app/deals?stage=ARCHIVED')
+  await expect(page.getByTestId(`deal-row-${dealId}`)).toBeVisible()
+
+  /*
+   * Deletion: the irreversible one. The confirmation warns that the money goes
+   * with the deal, the card is left behind because it no longer exists, and the
+   * report drops the revenue the archive had kept.
+   */
+  await page.goto(`/app/deals/${dealId}`)
+  await page.getByRole('button', { name: 'Удалить' }).click()
+  await expect(page.getByText('Заявка с оплатой')).toBeVisible()
+  await page.getByTestId('delete-deal').click()
+
+  await expect(page).toHaveURL(/\/app\/deals$/)
+  await page.goto(`/app/deals?q=${encodeURIComponent(phone)}`)
+  await expect(page.getByTestId(`deal-row-${dealId}`)).toHaveCount(0)
+
+  await page.goto('/app/dashboard')
+  await expect(page.getByTestId('dashboard-won-amount')).not.toContainText('80 000')
 })
 
 /* ------------------------------------------------------------------ *

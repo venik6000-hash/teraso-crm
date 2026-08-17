@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import type {
+  AssignableUserDto,
   ClientDetailDto,
   ClientLookupResponse,
   DashboardDto,
@@ -17,8 +18,10 @@ import type { AuthenticatedPrincipal } from '../../auth'
 import { CrmFailure } from '../domain/errors'
 import { CrmService } from './crm-service'
 import type {
+  AssignableUsersReader,
   CrmRepository,
   DealCreateCommand,
+  DealDeleteCommand,
   DealStageChangeCommand,
   DealUpdateCommand,
   InboundQuizLeadCommand,
@@ -42,6 +45,7 @@ type RecordedCalls = {
   createDeal: DealCreateCommand[]
   updateDeal: DealUpdateCommand[]
   changeStage: DealStageChangeCommand[]
+  deleteDeal: DealDeleteCommand[]
   addNote: NoteCommand[]
   recordInboundQuizLead: InboundQuizLeadCommand[]
   lookupClientByPhone: Array<{ phoneNormalized: string; now: Date }>
@@ -55,6 +59,7 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
     createDeal: [],
     updateDeal: [],
     changeStage: [],
+    deleteDeal: [],
     addNote: [],
     recordInboundQuizLead: [],
     lookupClientByPhone: [],
@@ -88,13 +93,17 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
       calls.changeStage.push(command)
       return { id: 'deal' } as unknown as DealDetailDto
     },
+    deleteDeal: async (command) => {
+      calls.deleteDeal.push(command)
+      return true
+    },
     addNote: async (command) => {
       calls.addNote.push(command)
       return { id: 'activity' } as unknown as DealActivityDto
     },
     createTask: async () => ({ id: 'task' }) as unknown as DealTaskDto,
     updateTask: async () => ({ id: 'task' }) as unknown as DealTaskDto,
-    listCriticalTasks: async () => ({ items: [] }),
+    listCriticalTasks: async () => ({ items: [], hasMore: false }),
     findClient: async () => null,
     lookupClientByPhone: async (phoneNormalized, at) => {
       calls.lookupClientByPhone.push({ phoneNormalized, now: at })
@@ -113,11 +122,25 @@ function createRepository(overrides: Partial<CrmRepository> = {}) {
   return { calls, repository }
 }
 
-function createService(overrides: Partial<CrmRepository> = {}, notifier?: LeadNotifier) {
+const administrators: AssignableUserDto[] = [
+  { id: actor.id, name: 'Руководитель' },
+  { id: '00000000-0000-7000-8000-000000000002', name: 'manager@teraso.com.ua' },
+]
+
+function createService(
+  overrides: Partial<CrmRepository> = {},
+  notifier?: LeadNotifier,
+  assignableUsers: AssignableUsersReader = { listAssignableUsers: async () => administrators },
+) {
   const { calls, repository } = createRepository(overrides)
   return {
     calls,
-    service: new CrmService({ repository, clock: { now: () => now }, notifier }),
+    service: new CrmService({
+      assignableUsers,
+      repository,
+      clock: { now: () => now },
+      notifier,
+    }),
   }
 }
 
@@ -241,11 +264,15 @@ describe('actor and clock', () => {
     await service.updateDeal('deal-1', { currentNote: 'Перезвонить' }, actor)
     await service.changeStage('deal-1', { stage: 'QUALIFIED' }, actor)
     await service.addNote('deal-1', { text: 'Звонил, занят' }, actor)
+    await service.deleteDeal('deal-1', actor)
 
     expect(calls.createDeal[0]?.actorUserId).toBe(actor.id)
     expect(calls.updateDeal[0]?.actorUserId).toBe(actor.id)
     expect(calls.changeStage[0]?.actorUserId).toBe(actor.id)
     expect(calls.addNote[0]?.actorUserId).toBe(actor.id)
+    // A deletion stamps nothing durable — there is no row left — but it still
+    // carries who asked, so tracing and any future audit have the fact already.
+    expect(calls.deleteDeal[0]).toEqual({ dealId: 'deal-1', actorUserId: actor.id, now })
   })
 
   test('reads urgency against the injected clock rather than the wall clock', async () => {
@@ -273,6 +300,9 @@ describe('missing records', () => {
       findDeal: async () => null,
       updateDeal: async () => null,
       changeStage: async () => null,
+      // A deletion reports absence as `false` rather than `null`, because there
+      // is no record to hand back either way; the service still owes a 404.
+      deleteDeal: async () => false,
       addNote: async () => null,
       findClient: async () => null,
     }).service
@@ -284,6 +314,9 @@ describe('missing records', () => {
       () => service.updateDeal('11111111-1111-7111-8111-111111111111', { currentNote: 'x' }, actor),
       () => service.changeStage('11111111-1111-7111-8111-111111111111', { stage: 'QUALIFIED' }, actor),
       () => service.addNote('11111111-1111-7111-8111-111111111111', { text: 'x' }, actor),
+      // Deleting what is already gone must fail rather than report success: a
+      // 200 here would make a double submission look like a second deletion.
+      () => service.deleteDeal('11111111-1111-7111-8111-111111111111', actor),
     ]) {
       const error = await operation().catch((caught: unknown) => caught)
       expect(error).toBeInstanceOf(CrmFailure)
@@ -428,5 +461,38 @@ describe('deal detail reads', () => {
     const { service } = createService({ findClient: async () => client })
 
     expect(await service.getClient('11111111-1111-7111-8111-111111111111', actor)).toBe(client)
+  })
+})
+
+/**
+ * The staff picker's list arrives through the accounts port, not from a CRM table.
+ *
+ * The port owns "which accounts may be handed a deal" — administrators, because
+ * the CRM API and the notification fan-out are both administrator-only — so the
+ * service must pass its answer through untouched. A copy of that rule here would
+ * be a second owner of the population, free to disagree with the first.
+ */
+describe('assignable people', () => {
+  test('serves the accounts port verbatim and asks persistence nothing', async () => {
+    const asked: number[] = []
+    const { calls, service } = createService({}, undefined, {
+      listAssignableUsers: async () => {
+        asked.push(1)
+        return administrators
+      },
+    })
+
+    expect(await service.listAssignableUsers(actor)).toEqual(administrators)
+    expect(asked).toHaveLength(1)
+    // No CRM read is involved: the roster is not this context's data.
+    expect(calls.listDeals).toHaveLength(0)
+  })
+
+  test('passes an empty roster through rather than inventing the caller', async () => {
+    const { service } = createService({}, undefined, {
+      listAssignableUsers: async () => [],
+    })
+
+    expect(await service.listAssignableUsers(actor)).toEqual([])
   })
 })

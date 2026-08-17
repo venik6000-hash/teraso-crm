@@ -1,5 +1,6 @@
 import {
   apiErrorSchema,
+  assignableUsersResponseSchema,
   clientDetailResponseSchema,
   clientLookupQuerySchema,
   clientLookupResponseSchema,
@@ -11,6 +12,7 @@ import {
   dealBoardQuerySchema,
   dealBoardResponseSchema,
   dealCreateSchema,
+  dealDeleteResponseSchema,
   dealDetailResponseSchema,
   dealListQuerySchema,
   dealListResponseSchema,
@@ -48,6 +50,7 @@ const listDealsRoute = createRoute({
     200: { ...jsonBody(dealListResponseSchema), description: 'Paginated deals' },
     400: { content: errorContent, description: 'Invalid query' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
   },
 })
 
@@ -60,6 +63,7 @@ const createDealRoute = createRoute({
     201: { ...jsonBody(dealDetailResponseSchema), description: 'Created deal' },
     400: { content: errorContent, description: 'Invalid payload' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     413: { content: errorContent, description: 'Request body is too large' },
     429: { content: errorContent, description: 'Too many requests' },
   },
@@ -78,6 +82,7 @@ const getBoardRoute = createRoute({
     200: { ...jsonBody(dealBoardResponseSchema), description: 'Deals grouped by active stage' },
     400: { content: errorContent, description: 'Invalid query' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
   },
 })
 
@@ -90,6 +95,7 @@ const getDealRoute = createRoute({
     200: { ...jsonBody(dealDetailResponseSchema), description: 'Deal with history' },
     400: { content: errorContent, description: 'Invalid deal id' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Deal not found' },
   },
 })
@@ -103,6 +109,7 @@ const changeStageRoute = createRoute({
     200: { ...jsonBody(dealDetailResponseSchema), description: 'Deal after the stage move' },
     400: { content: errorContent, description: 'Invalid payload or forbidden transition' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Deal not found' },
     413: { content: errorContent, description: 'Request body is too large' },
     429: { content: errorContent, description: 'Too many requests' },
@@ -118,6 +125,7 @@ const createTaskRoute = createRoute({
     201: { ...jsonBody(dealTaskResponseSchema), description: 'Created task' },
     400: { content: errorContent, description: 'Invalid payload' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Deal not found' },
     413: { content: errorContent, description: 'Request body is too large' },
     429: { content: errorContent, description: 'Too many requests' },
@@ -133,8 +141,32 @@ const updateDealRoute = createRoute({
     200: { ...jsonBody(dealDetailResponseSchema), description: 'Updated deal' },
     400: { content: errorContent, description: 'Invalid payload' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Deal not found' },
     413: { content: errorContent, description: 'Request body is too large' },
+    429: { content: errorContent, description: 'Too many requests' },
+  },
+})
+
+/**
+ * Permanent deletion. It answers with the erased id rather than 204 so the
+ * response travels the same schema-parsed path as every other CRM call.
+ *
+ * A deal that is already gone is a 404, not a courtesy 200: the caller asked to
+ * delete something that does not exist, and reporting success would make a
+ * double submission indistinguishable from a real deletion.
+ */
+const deleteDealRoute = createRoute({
+  method: 'delete',
+  path: '/deals/{dealId}',
+  security: bearerSecurity,
+  request: { params: dealParamsSchema },
+  responses: {
+    200: { ...jsonBody(dealDeleteResponseSchema), description: 'Deal erased permanently' },
+    400: { content: errorContent, description: 'Invalid deal id' },
+    401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
+    404: { content: errorContent, description: 'Deal not found' },
     429: { content: errorContent, description: 'Too many requests' },
   },
 })
@@ -148,6 +180,7 @@ const addNoteRoute = createRoute({
     201: { ...jsonBody(dealActivityResponseSchema), description: 'Recorded note' },
     400: { content: errorContent, description: 'Invalid payload' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Deal not found' },
     413: { content: errorContent, description: 'Request body is too large' },
     429: { content: errorContent, description: 'Too many requests' },
@@ -163,6 +196,7 @@ const updateTaskRoute = createRoute({
     200: { ...jsonBody(dealTaskResponseSchema), description: 'Updated task' },
     400: { content: errorContent, description: 'Invalid payload' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Task not found' },
     413: { content: errorContent, description: 'Request body is too large' },
     429: { content: errorContent, description: 'Too many requests' },
@@ -177,6 +211,7 @@ const criticalTasksRoute = createRoute({
   responses: {
     200: { ...jsonBody(criticalTasksResponseSchema), description: 'Overdue tasks on open deals' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
   },
 })
 
@@ -193,6 +228,7 @@ const getDashboardRoute = createRoute({
     200: { ...jsonBody(dashboardResponseSchema), description: 'Sales report for the period' },
     400: { content: errorContent, description: 'Invalid period' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
   },
 })
 
@@ -208,6 +244,28 @@ const lookupClientRoute = createRoute({
     },
     400: { content: errorContent, description: 'Invalid phone' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
+  },
+})
+
+/**
+ * The people the deal form may offer as responsible (PRD 7.1).
+ *
+ * A literal single-segment path with no parameterized sibling on this router, so
+ * unlike `/deals/board` and `/tasks/critical` its registration order carries no
+ * meaning — there is nothing for it to be shadowed by or to shadow.
+ */
+const listAssignableUsersRoute = createRoute({
+  method: 'get',
+  path: '/users',
+  security: bearerSecurity,
+  responses: {
+    200: {
+      ...jsonBody(assignableUsersResponseSchema),
+      description: 'Administrators a deal may be assigned to',
+    },
+    401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
   },
 })
 
@@ -220,22 +278,36 @@ const getClientRoute = createRoute({
     200: { ...jsonBody(clientDetailResponseSchema), description: 'Client with every deal' },
     400: { content: errorContent, description: 'Invalid client id' },
     401: { content: errorContent, description: 'Authentication required' },
+    403: { content: errorContent, description: 'Administrator access required' },
     404: { content: errorContent, description: 'Client not found' },
   },
 })
 
 type CreateCrmRoutesOptions = {
+  requireAdmin: MiddlewareHandler<AuthHttpEnv>
   requireAuth: MiddlewareHandler<AuthHttpEnv>
   service: CrmService
   taskService: TaskService
 }
 
-export function createCrmRoutes({ requireAuth, service, taskService }: CreateCrmRoutesOptions) {
+export function createCrmRoutes({
+  requireAdmin,
+  requireAuth,
+  service,
+  taskService,
+}: CreateCrmRoutesOptions) {
   const routes = new OpenAPIHono<AuthHttpEnv>({ defaultHook: validationErrorHook })
 
   /**
-   * PRD 10: access is enforced at the API, not only in the interface. The guard
-   * is scoped to the concrete authenticated subpaths rather than a `'*'`
+   * PRD 10: roles are enforced at the API, not only in the interface — and PRD 3
+   * gives the MVP one руководитель, so every path on this router asks for an
+   * administrator, not merely a signed-in account. Registration hands out the
+   * `user` role, so without the second guard anyone who can reach the deployment
+   * could self-register into every client name, phone number and deal amount.
+   * `requireAuth` runs first because `requireAdmin` reads the principal it sets:
+   * anonymous is 401, a signed-in non-administrator is 403.
+   *
+   * The pair is scoped to the concrete guarded subpaths rather than a `'*'`
    * catch-all on purpose: a catch-all on this router, mounted at `/api/crm`,
    * would shadow Task 5's unauthenticated `/api/crm/inbound/quiz` webhook and
    * answer 401 for it depending on mount order. Scoped guards leave the router
@@ -244,13 +316,21 @@ export function createCrmRoutes({ requireAuth, service, taskService }: CreateCrm
    * `/tasks` and `/tasks/*` are guarded explicitly: they match neither `/deals`
    * nor `/clients`, so without their own guard `PATCH /tasks/:id` and
    * `GET /tasks/critical` would ship unauthenticated over a CRM full of PII.
+   * `/users` is on the list for the same reason: it names the staff a deal can be
+   * handed to, which is not something an anonymous caller may enumerate.
    */
-  routes.use('/deals', requireAuth)
-  routes.use('/deals/*', requireAuth)
-  routes.use('/tasks', requireAuth)
-  routes.use('/tasks/*', requireAuth)
-  routes.use('/clients/*', requireAuth)
-  routes.use('/dashboard', requireAuth)
+  for (const path of [
+    '/deals',
+    '/deals/*',
+    '/tasks',
+    '/tasks/*',
+    '/clients/*',
+    '/dashboard',
+    '/users',
+  ]) {
+    routes.use(path, requireAuth)
+    routes.use(path, requireAdmin)
+  }
 
   routes.openapi(listDealsRoute, async (c) => {
     return c.json(await executeCrm(() => service.listDeals(c.req.valid('query'), c.var.user)), 200)
@@ -278,6 +358,13 @@ export function createCrmRoutes({ requireAuth, service, taskService }: CreateCrm
       service.updateDeal(c.req.valid('param').dealId, c.req.valid('json'), c.var.user),
     )
     return c.json({ deal }, 200)
+  })
+
+  routes.openapi(deleteDealRoute, async (c) => {
+    const deletedDealId = await executeCrm(() =>
+      service.deleteDeal(c.req.valid('param').dealId, c.var.user),
+    )
+    return c.json({ deletedDealId }, 200)
   })
 
   routes.openapi(changeStageRoute, async (c) => {
@@ -325,6 +412,11 @@ export function createCrmRoutes({ requireAuth, service, taskService }: CreateCrm
    */
   routes.openapi(lookupClientRoute, async (c) => {
     return c.json(await executeCrm(() => service.lookupClient(c.req.valid('query'), c.var.user)), 200)
+  })
+
+  routes.openapi(listAssignableUsersRoute, async (c) => {
+    const users = await executeCrm(() => service.listAssignableUsers(c.var.user))
+    return c.json({ users }, 200)
   })
 
   routes.openapi(getClientRoute, async (c) => {

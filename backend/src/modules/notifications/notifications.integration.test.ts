@@ -349,7 +349,7 @@ maybeDescribe('notifications integration', () => {
    * ---------------------------------------------------------------- */
 
   describe('new lead announcements', () => {
-    test('announces a committed inbound lead to every user', async () => {
+    test('announces a committed inbound lead to every administrator', async () => {
       const response = await deliverSigned(JSON.stringify(leadPayload()))
       expect(response.status).toBe(201)
       const { dealId } = (await response.json()) as { dealId: string }
@@ -564,6 +564,88 @@ maybeDescribe('notifications integration', () => {
   })
 
   /* ---------------------------------------------------------------- *
+   * Access (PRD 3, PRD 10)
+   * ---------------------------------------------------------------- */
+
+  describe('api access', () => {
+    /**
+     * Registration is open and creates the `user` role, so the inbox has to refuse
+     * that account: every notification body carries a client's name and links at a
+     * deal card the CRM API would answer 403 for. Signed in but not permitted is
+     * 403, not 401, and it holds on the reads AND the writes — a dropped guard on
+     * the subscription routes would let a self-registered browser be enrolled for
+     * pushes about customers.
+     */
+    test('refuses an authenticated non-administrator on every notification route', async () => {
+      const outsider = await registerWithoutPromotion('outsider@teraso.com.ua', 'Гость')
+      const headers = jsonHeaders(outsider.accessToken)
+      const requests: ReadonlyArray<readonly [string, RequestInit]> = [
+        ['/api/notifications', { headers }],
+        ['/api/notifications?unreadOnly=true', { headers }],
+        ['/api/notifications/vapid-public-key', { headers }],
+        [
+          '/api/notifications/read',
+          { method: 'POST', headers, body: JSON.stringify({ notificationIds: [] }) },
+        ],
+        [
+          '/api/notifications/subscriptions',
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              endpoint: 'https://push.example/outsider',
+              expirationTime: null,
+              keys: { p256dh: 'p256dh-key', auth: 'auth-secret' },
+            }),
+          },
+        ],
+        [
+          '/api/notifications/subscriptions/01912d4e-5555-7000-8000-000000000005',
+          { method: 'DELETE', headers },
+        ],
+      ]
+
+      for (const [path, init] of requests) {
+        const response = await app.request(path, init)
+        expect(`${init.method ?? 'GET'} ${path} -> ${response.status}`).toBe(
+          `${init.method ?? 'GET'} ${path} -> 403`,
+        )
+        expect((await response.json()).error.code).toBe('FORBIDDEN')
+      }
+
+      expect(await prisma.pushSubscription.count()).toBe(0)
+    })
+
+    /**
+     * The other half of the same rule, one layer down: the fan-out for a fact
+     * nobody owns personally is «every administrator», not «every user». Leaving it
+     * unfiltered would write client names into an inbox its owner is refused
+     * access to — the record would exist and simply never be readable.
+     */
+    test('never writes a notification for a non-administrator', async () => {
+      const outsider = await registerWithoutPromotion('outsider@teraso.com.ua', 'Гость')
+
+      expect((await deliverSigned(JSON.stringify(leadPayload()))).status).toBe(201)
+      await backgroundTasks.drain(5_000)
+      await seedDealWithDueTask({ dueMinutesAgo: 5 })
+      await runCronTask('crm:notifications:dispatch', cronRuntime)
+
+      expect(
+        await prisma.notification.count({ where: { recipientUserId: outsider.user.id } }),
+      ).toBe(0)
+      // The administrators still received both facts, so the filter narrowed the
+      // fan-out rather than breaking it.
+      const recipients = await prisma.notification.findMany({
+        distinct: ['recipientUserId'],
+        select: { recipientUserId: true },
+      })
+      expect(recipients.map((row) => row.recipientUserId).sort()).toEqual(
+        [ownerId, secondId].sort(),
+      )
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
    * VAPID key exposure (PRD 10)
    * ---------------------------------------------------------------- */
 
@@ -638,7 +720,7 @@ maybeDescribe('notifications integration', () => {
    * A deal with one ACTIVE task, written straight through Prisma so the due and
    * creation instants can be placed exactly where a condition needs them. The
    * task is deliberately unassigned and the deal unowned — the shape Task 5's
-   * webhook produces — so both notifications fan out to every user.
+   * webhook produces — so both notifications fan out to every administrator.
    */
   async function seedDealWithDueTask(options: { dueMinutesAgo: number; createdMinutesAgo?: number }) {
     const now = Date.now()
@@ -725,7 +807,23 @@ maybeDescribe('notifications integration', () => {
     return pushSubscriptionResponseSchema.parse(await response.json()).subscription
   }
 
+  /**
+   * An administrator, because the inbox is administrator-only (PRD 3) and the
+   * recipient fan-out is filtered on the role.
+   *
+   * Registration hands out `user`, so the account is promoted straight through
+   * Prisma. The token issued a moment earlier keeps working: the role is read from
+   * the database record on every request, never from a JWT claim. The deliberately
+   * unpromoted account for the refusal guard comes from
+   * `registerWithoutPromotion`.
+   */
   async function register(email: string, displayName?: string) {
+    const session = await registerWithoutPromotion(email, displayName)
+    await prisma.user.update({ where: { id: session.user.id }, data: { role: 'admin' } })
+    return session
+  }
+
+  async function registerWithoutPromotion(email: string, displayName?: string) {
     const response = await app.request('/api/auth/token/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

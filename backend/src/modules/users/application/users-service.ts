@@ -9,6 +9,7 @@ import type { AuthenticatedPrincipal } from '../../auth'
 import type {
   AdminDashboardReader,
   AdminUsersReader,
+  AssignableUsersReader,
   Clock,
   ProfileWriter,
   UserRecord,
@@ -18,6 +19,7 @@ import type {
 type UsersServiceDependencies = {
   adminDashboardReader: AdminDashboardReader
   adminUsersReader: AdminUsersReader
+  assignableUsersReader: AssignableUsersReader
   clock: Clock
   profileWriter: ProfileWriter
   userRoleUpdater: UserRoleUpdater
@@ -43,6 +45,23 @@ export class UsersService {
 
   listUsers(query: AdminUsersQuery) {
     return this.dependencies.adminUsersReader.listUsers(query)
+  }
+
+  /**
+   * The administrators another bounded context may offer as an owner of its own
+   * records — today the CRM's «ответственный» picker (PRD 7.1).
+   *
+   * There is no route for it on this module's routers: it leaves through the
+   * narrow reader `createUsersModule` returns, and the consuming context serves it
+   * behind its own guards. It goes through the service rather than handing the
+   * repository across the boundary so a later policy — excluding a suspended
+   * account, say — has an obvious home that is not somebody else's module.
+   *
+   * No principal argument: the caller's own guard decides who may see the list,
+   * and every answer is the same for every administrator.
+   */
+  listAssignableUsers() {
+    return this.dependencies.assignableUsersReader.listAssignableUsers()
   }
 
   async updateRole(

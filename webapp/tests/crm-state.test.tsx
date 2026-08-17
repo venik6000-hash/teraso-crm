@@ -16,7 +16,11 @@ import {
   toInstantFromKyivInput,
   toKyivDateTimeInput,
 } from '../src/features/crm/model'
-import { crmQueryKeys, crmInvalidatedRoots } from '../src/features/crm/queries'
+import {
+  crmQueryKeys,
+  crmInvalidatedRoots,
+  deletionInvalidatedRoots,
+} from '../src/features/crm/queries'
 
 /* ------------------------------------------------------------------ *
  * Cache isolation between sessions
@@ -69,7 +73,10 @@ test('signing in drops whatever the previous account left behind', () => {
   expect(crmCacheEntries(queryClient)).toHaveLength(0)
 })
 
-test('every key the CRM can produce is covered by an invalidated root', () => {
+const isInvalidated = (key: ReadonlyArray<unknown>) =>
+  crmInvalidatedRoots.some((root) => root.every((segment, index) => key[index] === segment))
+
+test('every key a deal mutation can stale is covered by an invalidated root', () => {
   const producedKeys = [
     crmQueryKeys.deals(parseDealListSearch({})),
     crmQueryKeys.deal('deal-1'),
@@ -81,13 +88,61 @@ test('every key the CRM can produce is covered by an invalidated root', () => {
     }),
     crmQueryKeys.dashboard({ period: 'month' }),
     crmQueryKeys.clientLookup('+380671234567'),
+    crmQueryKeys.criticalTasks(),
   ]
 
   for (const key of producedKeys) {
-    const covered = crmInvalidatedRoots.some((root) =>
+    expect({ key, covered: isInvalidated(key) }).toEqual({ key, covered: true })
+  }
+})
+
+/**
+ * The one CRM key deliberately left OUT of the invalidation list, pinned here so
+ * the omission reads as a decision rather than as the next thing somebody "fixes".
+ *
+ * The staff roster and the names in it change only through the account console; no
+ * CRM mutation can alter either. Refetching it after every note, stage move and
+ * task would spend a request per mutation on an answer that cannot have changed.
+ * It is still keyed under `crm`, so the session teardown above evicts it.
+ */
+test('the staff roster is not refetched by CRM mutations, but is evicted with the session', () => {
+  expect(isInvalidated(crmQueryKeys.assignableUsers())).toBe(false)
+  expect(crmQueryKeys.assignableUsers()[0]).toBe('crm')
+})
+
+/**
+ * A deletion refreshes everything except the record it just erased.
+ *
+ * Refetching `['crm', 'deal', id]` for a deal that no longer exists can only
+ * answer 404, which would repaint the card as «Сделка не открылась» in the
+ * moment the owner is being navigated away from it. The entry is dropped from
+ * the cache instead — the card is gone because the deal is gone, not because a
+ * request failed.
+ */
+test('a deletion refreshes every root except the erased deal own entry', () => {
+  const isRefreshedAfterDeletion = (key: ReadonlyArray<unknown>) =>
+    deletionInvalidatedRoots.some((root) =>
       root.every((segment, index) => key[index] === segment),
     )
-    expect({ key, covered }).toEqual({ key, covered: true })
+
+  expect(isRefreshedAfterDeletion(crmQueryKeys.deal('deal-1'))).toBe(false)
+
+  // Everything else a deletion changes is still refreshed: the row leaves the
+  // list and the board, the money leaves the dashboard, the tasks leave the
+  // critical queue, and the client's phone is free of an open deal again.
+  for (const key of [
+    crmQueryKeys.deals(parseDealListSearch({})),
+    crmQueryKeys.board({
+      noNextStep: false,
+      overdue: false,
+      dueToday: false,
+      isCritical: false,
+    }),
+    crmQueryKeys.dashboard({ period: 'month' }),
+    crmQueryKeys.clientLookup('+380671234567'),
+    crmQueryKeys.criticalTasks(),
+  ]) {
+    expect({ key, refreshed: isRefreshedAfterDeletion(key) }).toEqual({ key, refreshed: true })
   }
 })
 

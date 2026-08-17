@@ -1,9 +1,12 @@
 import {
   DEAL_DETAIL_TASK_LIMIT,
+  type AssignableUserDto,
   type DealDetailDto,
   type DealStageChangeInput,
+  type DealTaskDto,
   type DealUpdateInput,
   type TaskCreateInput,
+  type TaskUpdateInput,
 } from '@teraso-crm/contracts'
 import { useState, type ReactNode } from 'react'
 
@@ -39,9 +42,12 @@ import { ActivityTimeline } from './ActivityTimeline'
 import { ContactActions } from './ContactActions'
 import { CriticalBadge } from './CriticalBadge'
 import { LeadClassBadge, NextStepBadge, StageBadge } from './DealBadges'
+import { DealDeleteDialog } from './DealDeleteDialog'
 import { DealEditDialog } from './DealEditDialog'
 import { DealStageDialog } from './DealStageDialog'
+import { TaskActions } from './TaskActions'
 import { TaskDialog } from './TaskDialog'
+import { TaskRescheduleDialog } from './TaskRescheduleDialog'
 
 /**
  * The deal card (PRD 7.1).
@@ -53,8 +59,13 @@ import { TaskDialog } from './TaskDialog'
  *
  * On a phone the two columns stack, so the client, the contact buttons and the
  * note stay above the fold and reachable one-handed (PRD 10).
+ *
+ * The «Задачи» tab is where a task is actually worked (PRD 6.2): an active task
+ * offers «Выполнена», «Перенести» and «Отменить» through `TaskActions`, and a
+ * terminal one offers nothing, because the server refuses to edit it.
  */
 export function DealDetail({
+  assignableUsers,
   currentUserId,
   deal,
   error = null,
@@ -62,9 +73,13 @@ export function DealDetail({
   onAddNote,
   onChangeStage,
   onCreateTask,
+  onDeleteDeal,
   onSaveNote,
   onUpdateDeal,
+  onUpdateTask,
 }: {
+  /** The «Ответственный» picker's options, handed to the edit dialog unchanged. */
+  assignableUsers?: ReadonlyArray<AssignableUserDto>
   currentUserId?: string
   deal: DealDetailDto
   error?: Error | null
@@ -73,11 +88,17 @@ export function DealDetail({
   onChangeStage: (input: DealStageChangeInput) => void
   /** Absent leaves the card read-only for tasks, which is how tests render it. */
   onCreateTask?: (input: TaskCreateInput) => void
+  /** Absent hides «Удалить» entirely: no handler, no irreversible button. */
+  onDeleteDeal?: () => void
   onSaveNote: (note: string | null) => void
   onUpdateDeal: (input: DealUpdateInput) => void
+  /** Absent leaves every task read-only, matching `onCreateTask`. */
+  onUpdateTask?: (taskId: string, input: TaskUpdateInput) => void
 }) {
   const landingHref = safeExternalHref(deal.landingUrl)
   const [isSchedulingTask, setIsSchedulingTask] = useState(false)
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false)
+  const [reschedulingTask, setReschedulingTask] = useState<DealTaskDto | null>(null)
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
@@ -130,6 +151,7 @@ export function DealDetail({
                   onChangeStage={onChangeStage}
                 />
                 <DealEditDialog
+                  assignableUsers={assignableUsers}
                   deal={deal}
                   isSaving={isSaving}
                   key={`edit-${deal.updatedAt}`}
@@ -141,7 +163,31 @@ export function DealDetail({
                   </Button>
                 )}
                 <AttributionDrawer deal={deal} />
+                {/*
+                  Last in the row and behind its own confirmation: it is the only
+                  irreversible action on this card. Absent when the page passes no
+                  handler, matching how tasks stay read-only in a bare render.
+                */}
+                {onDeleteDeal && (
+                  <Button
+                    onClick={() => setIsConfirmingDelete(true)}
+                    size="sm"
+                    type="button"
+                    variant="destructive"
+                  >
+                    <Typography variant="control">Удалить</Typography>
+                  </Button>
+                )}
               </div>
+
+              {onDeleteDeal && isConfirmingDelete && (
+                <DealDeleteDialog
+                  deal={deal}
+                  isDeleting={isSaving}
+                  onCancel={() => setIsConfirmingDelete(false)}
+                  onConfirm={onDeleteDeal}
+                />
+              )}
 
               {onCreateTask && (
                 <TaskDialog
@@ -330,10 +376,35 @@ export function DealDetail({
                           </Typography>
                         </div>
                         <Typography variant="bodySm">{task.title}</Typography>
+                        {onUpdateTask && (
+                          <TaskActions
+                            isSaving={isSaving}
+                            onCancel={() => onUpdateTask(task.id, { status: 'CANCELLED' })}
+                            onComplete={() => onUpdateTask(task.id, { status: 'COMPLETED' })}
+                            onReschedule={() => setReschedulingTask(task)}
+                            task={task}
+                          />
+                        )}
                       </div>
                     ))
                   )}
                 </div>
+
+                {onUpdateTask && reschedulingTask && (
+                  <TaskRescheduleDialog
+                    isPending={isSaving}
+                    key={reschedulingTask.id}
+                    onOpenChange={(open) => {
+                      if (!open) setReschedulingTask(null)
+                    }}
+                    onSubmit={(input) => {
+                      onUpdateTask(reschedulingTask.id, input)
+                      setReschedulingTask(null)
+                    }}
+                    open
+                    task={reschedulingTask}
+                  />
+                )}
               </TabsContent>
             </Tabs>
           </CardContent>

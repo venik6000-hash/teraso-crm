@@ -131,11 +131,13 @@ beforeEach(() => {
     useDashboardQuery: () => ({ data: undefined, isPending: false, isError: false }),
     useCriticalTasksQuery: () => ({ data: undefined, isPending: false, isError: false }),
     useClientLookupQuery: () => ({ data: undefined, isPending: false, isError: false }),
+    useAssignableUsersQuery: () => ({ data: undefined, isPending: false, isError: false }),
     useCreateDealMutation: () => idleMutation(),
     useUpdateDealMutation: () => idleMutation(),
     useAddDealNoteMutation: () => idleMutation(),
     useCreateTaskMutation: () => idleMutation(),
     useUpdateTaskMutation: () => idleMutation(),
+    useDeleteDealMutation: () => idleMutation(),
     useChangeDealStageMutation: (hookDealId?: string) => ({
       mutate: (argument: unknown) => stageCalls.push({ hookDealId, argument }),
       isPending: false,
@@ -184,9 +186,10 @@ test('a reopen drop targets the dragged deal', async () => {
 })
 
 /**
- * The paid stages and the loss zone must NOT commit on the drop itself: the
- * contract refuses them without a payment or a reason, so the confirmation is
- * what carries those fields.
+ * The paid stages and both terminal zones must NOT commit on the drop itself.
+ * The contract refuses a payment or a loss without its fields, so those need the
+ * confirmation to carry them; the archive needs no fields at all and is still
+ * held back, because a stray drag must not silently sweep a deal off the board.
  */
 test('a drop needing confirmation does not commit on its own', async () => {
   const onDrop = await renderBoard()
@@ -194,6 +197,7 @@ test('a drop needing confirmation does not commit on its own', async () => {
   onDrop(summary({ stage: 'PROPOSAL_SENT' }), { kind: 'payment', stage: 'PREPAYMENT' })
   onDrop(summary({ stage: 'PREPAYMENT' }), { kind: 'payment', stage: 'WON' })
   onDrop(summary(), { kind: 'loss' })
+  onDrop(summary({ stage: 'WON' }), { kind: 'archive' })
 
   expect(stageCalls).toHaveLength(0)
 })

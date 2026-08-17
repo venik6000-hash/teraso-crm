@@ -98,10 +98,30 @@ CRM release; do not rely on that to smuggle data — only the fields below are r
 | `budgetLabel` | string, ≤80 | — | The quiz budget. Does **not** set the deal's manual potential amount. |
 | `needTiming` | string, ≤120 | — | e.g. `Зараз`. |
 | `preferredChannel` | `CALL` \| `TELEGRAM` \| `WHATSAPP` \| `VIBER` | — | |
+| `note` | string, ≤2000 | — | What the customer typed, in their own words. See below. |
 | `attribution` | object (below) | — | Marketing/click identifiers. Stored, **never** returned. |
 
 `attribution` (all optional strings): `metaEventId`, `utmSource`, `utmMedium`,
 `utmCampaign`, `utmContent`, `utmTerm`, `gclid`, `gbraid`.
+
+### `note` is the customer's own message
+
+The comment box on the feedback form, or the quiz's assembled summary — whatever
+the person actually wrote. It is the one part of a lead a manager cannot rebuild
+from the structured fields: *«потрібна невелика (1,5-2 м.кв.) кількість
+термоясеня (20х95) (у Львові)»* is the entire job, and none of
+`material`/`areaLabel`/`budgetLabel` can express it.
+
+The CRM stores it as the **text of the deal's «Заявка получена» event**, not as a
+deal column. The event log is append-only, so the message stays exactly as
+delivered even after somebody edits the card, and a second submission on an open
+deal keeps its own text instead of overwriting the first one's.
+
+The site joins its `notes` and `summary` fields with a blank line when both are
+present: on the feedback form `notes` is the request itself while `summary`
+carries context such as the preferred channel, and neither is derivable from the
+other. Omit the field entirely when there is nothing to send — an empty or
+whitespace-only value leaves the event's text `null`.
 
 ### `receivedAt` must be UTC with a `Z` suffix
 
@@ -149,6 +169,7 @@ Identifiers are redacted; the shape is exactly what the site sends.
   "budgetLabel": "150000",
   "needTiming": "Зараз",
   "preferredChannel": "TELEGRAM",
+  "note": "Цікавить монтаж під ключ, передзвоніть після 18:00",
   "attribution": {
     "metaEventId": "REDACTED",
     "utmSource": "facebook",
@@ -210,6 +231,15 @@ deal back.
   deterministic; retrying the same body yields the same `400`. Fix the payload.
 - `receivedAt` and `externalId` stay the same across every retry of one lead;
   only the delivery timestamp and its signature change.
+
+**The guarantee lasts as long as the receipt does.** `[source, externalId]` is
+remembered on an ingestion receipt, and that receipt is destroyed if somebody
+permanently deletes the deal in the CRM. A delivery of the same lead afterwards
+is therefore ingested as a **new** deal rather than recognised as a duplicate —
+the CRM genuinely no longer holds any record of it. Nothing about the site's
+integration changes: retries land within minutes and this only matters for a
+lead deleted by hand in between. Archiving a deal, which is the ordinary way to
+clear the board, keeps its receipt and its idempotency intact.
 
 ## Server configuration
 
@@ -273,3 +303,66 @@ concern rather than a path to compromise.
 **Required compensating control:** apply an infrastructure-level rate limit to
 `POST /api/crm/inbound/quiz` at the WAF or load balancer, sized above the site's
 legitimate retry burst. Operating this is covered in the deployment runbook.
+
+## Site configuration
+
+The site half lives in `public/api.php` on `teraso.com.ua`. Two keys in the
+server's `config.php` switch the delivery on, and they are only honoured
+together (see `config.php.example` for the annotated block):
+
+| Key | Value |
+| --- | --- |
+| `crm_webhook_url` | Full HTTPS URL including the path: `https://<crm-host>/api/crm/inbound/quiz`. Plain `http://` is refused except on the loopback, for local development. |
+| `crm_webhook_secret` | The same string as the CRM's `TERASO_WEBHOOK_SECRET`, at least 32 characters. |
+
+Editing `config.php` on the host is enough — the site is static, so no rebuild
+or redeploy is involved. Leave either key empty and the CRM delivery is simply
+off; mail, Telegram, Google Sheets and the on-disk backup are untouched either
+way.
+
+`crm_notify()` runs **after** the response has been flushed to the visitor, so a
+slow or unreachable CRM never delays the «дякуємо». It retries up to three times
+on a network error, a `5xx` or a `401`, recomputing the signature with a fresh
+timestamp each attempt, and stops immediately on `400`/`413` because those are
+deterministic. A delivery that never succeeds is written to the PHP error log
+with its `lead_id`, and the lead is still in `leads/*.jsonl` — which is what
+makes the backfill below a complete recovery path, not a partial one.
+
+A messenger tap (`source=contact_click`) is not forwarded. It carries no name or
+phone, so the CRM would have no client to open a card for.
+
+## Backfilling history
+
+`POST /api/crm/inbound/quiz` bounds `receivedAt` to seven days in the past, so it
+cannot be used to load a backlog older than that. For history — leads that
+predate the webhook, or a recovery after a long outage — use the importer:
+
+```sh
+bun run --cwd backend import:site-leads -- --dry-run <export>...
+bun run --cwd backend import:site-leads -- <export>...
+```
+
+It accepts either the raw `leads-YYYY-MM.jsonl` off the web host or the
+`{ ok, month, leads: [...] }` body that `api.php?action=leads` returns to the
+admin inbox, and it writes through the same `CrmService` as the webhook — same
+receipt, same «Первично обработать заявку» task, same notification — with the
+clock rewound to each lead's arrival and the `created_at` columns aligned
+afterwards. Run `--dry-run` first: it maps and validates every row and names
+what it would skip, while a refusal is still cheap to fix.
+
+Two details matter when reading its report:
+
+- **Deduplication is by `[source, externalId]`, as with the webhook.** Rows older
+  than `lead_id` have none, so the importer derives a deterministic
+  `legacy_<timestamp>_<hash>` key from the arrival instant and the phone. Re-running
+  recomputes the same key and writes nothing, which is also what makes overlap
+  with the live webhook harmless.
+- **It skips what is not a customer**, and says which rule fired: messenger taps,
+  rows whose text carries a test marker (`codex`, `test`, `тест`, `не обрабатывать`
+  and similar), filler numbers such as `+380000000000`, and non-Ukrainian numbers
+  the CRM's phone identity cannot accept.
+
+Timestamps come from the `lead_id`, which `lead_make_id()` stamps in UTC. Older
+rows without one fall back to the `time` column, which is the host's Europe/Kyiv
+wall clock and is converted with the zone's real offset — verifiable on every row
+that carries both fields, where `time` sits exactly three hours ahead of the id.

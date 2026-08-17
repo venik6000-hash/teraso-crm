@@ -27,7 +27,7 @@ transport -> application -> domain/ports -> infrastructure -> DTO
 - `src/env.ts` validates environment variables with Zod.
 - `src/db.ts` creates the Prisma client.
 - `src/modules/auth/index.ts` is the auth module's public boundary and golden path. Its route factory captures dependencies in closures; request context contains only the authenticated principal.
-- `src/modules/users/index.ts` owns profile updates, administrator reads, and role mutations. It depends on auth only through the authenticated principal and route-guard capabilities.
+- `src/modules/users/index.ts` owns profile updates, administrator reads, and role mutations. It depends on auth only through the authenticated principal and route-guard capabilities. It also returns a narrow `assignableUsersReader` — the administrators another context may hand a record to — so the `users` table keeps one owner instead of each consumer writing its own query over it.
 
 Backend module ownership:
 
@@ -40,7 +40,7 @@ modules/<context>/
   infrastructure/   # Prisma and external provider adapters
 ```
 
-Transport must not import Prisma. Application and domain must not import Hono, Prisma, environment configuration, or provider SDKs. Infrastructure implements context-specific ports; repositories expose product operations rather than generic CRUD. Cross-context collaboration goes through public `index.ts` APIs or explicit application ports such as auth's `ProjectUser` and `LogoutCleanup`, never through another context's internals.
+Transport must not import Prisma. Application and domain must not import Hono, Prisma, environment configuration, or provider SDKs. Infrastructure implements context-specific ports; repositories expose product operations rather than generic CRUD. Cross-context collaboration goes through public `index.ts` APIs or explicit application ports such as auth's `ProjectUser` and `LogoutCleanup`, the CRM's `LeadNotifier` and `AssignableUsersReader`, never through another context's internals. A port is declared by the context that consumes it and implemented by the context that owns the data, with `app.ts` composing the two, so the dependency runs one way and neither module imports the other.
 
 Routes stay thin and translate HTTP into application calls and application failures into the stable API error shape. Do not put business rules into Hono handlers, UI clients, or child components.
 

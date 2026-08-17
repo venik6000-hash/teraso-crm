@@ -3,6 +3,7 @@ import type {
   AdminUserSummary,
   AdminUsersQuery,
   AdminUsersResponse,
+  AssignableUserDto,
   UserRole,
 } from '@teraso-crm/contracts'
 
@@ -24,6 +25,23 @@ export type AdminDashboardReader = {
 
 export type AdminUsersReader = {
   listUsers(query: AdminUsersQuery): Promise<AdminUsersResponse>
+}
+
+/**
+ * The people another bounded context may offer as an owner of its own records.
+ *
+ * It is a separate, deliberately tiny port rather than a filter on
+ * `AdminUsersReader`: that one serves the account console and returns a paged
+ * `AdminUserSummary` carrying email, role and creation date, none of which a
+ * picker in another context has any business receiving. Keeping the two apart is
+ * what lets this list cross a module boundary without exporting the account
+ * inventory with it.
+ *
+ * Administrators only. See `assignableUsersResponseSchema` for why that is a
+ * correctness rule and not a convenience.
+ */
+export type AssignableUsersReader = {
+  listAssignableUsers(): Promise<AssignableUserDto[]>
 }
 
 export type UserRoleUpdater = {

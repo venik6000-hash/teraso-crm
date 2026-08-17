@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/dialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Typography } from '@/components/typography'
-import { DEAL_STAGE_LABELS } from '../model'
+import { DEAL_STAGE_LABELS, isClosedStage } from '../model'
 import { emptyFormErrors } from '../validation'
 import { CrmSelectField } from './CrmField'
 import {
@@ -61,7 +61,10 @@ export function DealStageDialog({
   isSaving: boolean
   onChangeStage: (input: DealStageChangeInput) => void
 }) {
-  const isClosed = deal.stage === 'WON' || deal.stage === 'LOST'
+  // Won, lost and archived alike: the server's reopen rule is "any closed
+  // stage", derived from the same OPEN_DEAL_STAGES this reads, so the button
+  // appears exactly where the API would accept it.
+  const isClosed = isClosedStage(deal.stage)
 
   return (
     <>
@@ -77,8 +80,8 @@ export function DealStageDialog({
             <AlertDialogHeader>
               <AlertDialogTitle>Переоткрыть сделку?</AlertDialogTitle>
               <AlertDialogDescription>
-                Сделка вернётся на этап «Новая заявка», причина потери будет снята,
-                а событие останется в ленте.
+                Сделка вернётся на этап «Новая заявка» — из успеха, из потери или из
+                архива. Причина потери будет снята, а событие останется в ленте.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

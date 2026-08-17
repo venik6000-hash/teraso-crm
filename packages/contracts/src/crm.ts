@@ -23,7 +23,15 @@ import {
  * enum that the Vibe template ships.
  * ------------------------------------------------------------------ */
 
-export const dealStageSchema = z.enum(['NEW', 'QUALIFIED', 'PROPOSAL_SENT', 'PREPAYMENT', 'WON', 'LOST'])
+/**
+ * ARCHIVED is last because the migration that introduced it could only append:
+ * PostgreSQL freezes enum order at CREATE TYPE and `ALTER TYPE ... ADD VALUE`
+ * extends it. It is a terminal shelf rather than a step — see ACTIVE_DEAL_STAGES
+ * and OPEN_DEAL_STAGES for the two sets it deliberately stays out of.
+ */
+export const dealStageSchema = z.enum([
+  'NEW', 'QUALIFIED', 'PROPOSAL_SENT', 'PREPAYMENT', 'WON', 'LOST', 'ARCHIVED',
+])
 export const leadClassSchema = z.enum(['A', 'B', 'C'])
 export const taskKindSchema = z.enum(['CALL', 'MESSAGE', 'CLARIFY', 'OTHER'])
 export const taskStatusSchema = z.enum(['ACTIVE', 'COMPLETED', 'CANCELLED'])
@@ -52,7 +60,15 @@ export const dealActivityKindSchema = z.enum([
   'TASK_RESCHEDULED',
 ])
 
-/** Board columns, in funnel order. LOST never occupies a column (PRD 7.3). */
+/**
+ * Board columns, in funnel order. LOST never occupies a column (PRD 7.3), and
+ * neither does ARCHIVED.
+ *
+ * Membership here is not a display choice: FUNNEL_TRANSITIONS is derived from
+ * this list, so a stage added for the sake of a column also becomes a reported
+ * conversion step. An archive is where work goes to stop, so «Успех → Архив»
+ * would be a conversion rate measuring nothing.
+ */
 export const ACTIVE_DEAL_STAGES = ['NEW', 'QUALIFIED', 'PROPOSAL_SENT', 'PREPAYMENT', 'WON'] as const
 
 /**
@@ -67,7 +83,14 @@ export const ACTIVE_DEAL_STAGES = ['NEW', 'QUALIFIED', 'PROPOSAL_SENT', 'PREPAYM
  */
 export const DEAL_BOARD_COLUMN_LIMIT = 50
 
-/** Stages still expected to carry a next step. WON and LOST are exempt (PRD 7.4). */
+/**
+ * Stages still expected to carry a next step. WON and LOST are exempt (PRD 7.4),
+ * and so is ARCHIVED — shelving a deal that nobody intends to work must quiet it
+ * down, not make it critical for lacking the next step it was archived to avoid.
+ *
+ * Its complement is therefore exactly the closed set (WON, LOST, ARCHIVED), which
+ * is what both the reopen rule and the card's «Переоткрыть» button read.
+ */
 export const OPEN_DEAL_STAGES = ['NEW', 'QUALIFIED', 'PROPOSAL_SENT', 'PREPAYMENT'] as const
 
 /** Minutes a fresh deal may stay without a next step before it turns critical. */
@@ -84,6 +107,18 @@ export const DEAL_DETAIL_TASK_LIMIT = 50
  * add paging later without a breaking shape change. See clientDetailSchema.
  */
 export const CLIENT_DETAIL_DEAL_LIMIT = 50
+
+/**
+ * Tasks returned by the critical queue (PRD 7.4, PRD 10).
+ *
+ * The queue has no paging and nothing ages out of it on its own: an overdue task
+ * stays overdue until somebody completes, cancels or reschedules it. Two weeks
+ * away therefore mean a response carrying every late task at once and a row per
+ * task in the browser — the same unbounded growth the board column and the
+ * client's deal list are capped against. `hasMore` on the response says when the
+ * cap applied. See criticalTasksResponseSchema.
+ */
+export const CRITICAL_TASKS_LIMIT = 50
 
 /* ------------------------------------------------------------------ *
  * Local text helpers
@@ -298,8 +333,14 @@ export const dealNoteCreateSchema = z.object({ text: noteTextSchema }).strict()
  * than from the deal's stage, so a stray payment date attached to a QUALIFIED
  * deal would be reported to the owner as revenue.
  *
- * `lossReason: null` is how a reopen clears the stored reason: Task 4 defines
- * `WON|LOST -> NEW`, and a reopened deal must not keep showing «Причина потери».
+ * `lossReason: null` is how a reopen clears the stored reason: the domain defines
+ * `WON|LOST|ARCHIVED -> NEW`, and a reopened deal must not keep showing «Причина
+ * потери».
+ *
+ * A move to ARCHIVED carries nothing but an optional comment, and it needs no
+ * clause of its own to say so: both guards below reject a loss reason outside
+ * LOST and payment fields outside PREPAYMENT/WON, which is exactly the rule an
+ * archive has to obey. Shelving a deal must not be able to invent revenue.
  */
 export const dealStageChangeSchema = z
   .object({
@@ -446,6 +487,21 @@ export const inboundQuizLeadSchema = z.object({
   budgetLabel: z.string().trim().max(80).optional(),
   needTiming: z.string().trim().max(120).optional(),
   preferredChannel: preferredChannelSchema.optional(),
+  /**
+   * What the customer typed in their own words — the comment box on the feedback
+   * form, or the quiz's assembled summary.
+   *
+   * It is the one part of a lead a manager cannot reconstruct from the structured
+   * fields: «потрібна невелика (1,5-2 м.кв.) кількість термоясеня (20х95) (у
+   * Львові)» is the entire job, and none of material/area/budget can express it.
+   * Stored as the text of the deal's «Заявка получена» event, so it sits in the
+   * append-only log exactly as it arrived rather than in a field somebody can
+   * overwrite.
+   *
+   * Bounded well above a realistic message so a long one is kept whole; the raw
+   * body limit is the real ceiling.
+   */
+  note: z.string().trim().max(2000).optional(),
   attribution: z.object({
     metaEventId: z.string().max(180).optional(),
     utmSource: z.string().max(120).optional(),
@@ -631,6 +687,17 @@ export const dealDetailResponseSchema = z.object({ deal: dealDetailSchema }).str
 export const dealActivityResponseSchema = z.object({ activity: dealActivitySchema }).strict()
 export const dealTaskResponseSchema = z.object({ task: dealTaskSchema }).strict()
 
+/**
+ * What a permanent deletion answers with.
+ *
+ * The id rather than the record, because after the write there is no record: the
+ * deal, its tasks, its attribution and its append-only history are gone. The
+ * browser still needs the id to know which cached card, column entry and list row
+ * to drop, and a body — rather than a 204 — keeps this endpoint on the same typed
+ * request path as every other CRM call.
+ */
+export const dealDeleteResponseSchema = z.object({ deletedDealId: z.uuid() }).strict()
+
 export const clientDetailSchema = z
   .object({
     id: z.uuid(),
@@ -663,8 +730,60 @@ export const criticalTaskSchema = z
   .object({ task: dealTaskSchema, deal: dealSummarySchema })
   .strict()
 
+/**
+ * The overdue queue, soonest first, capped at CRITICAL_TASKS_LIMIT. `hasMore` is
+ * required for the same reason `hasMoreTasks`/`hasMoreActivities` and
+ * `hasMoreDeals` are: a producer that truncates a collection cannot omit saying
+ * so, and the screen has to be able to state what is not on it.
+ */
 export const criticalTasksResponseSchema = z
-  .object({ items: z.array(criticalTaskSchema) })
+  .object({
+    items: z.array(criticalTaskSchema).max(CRITICAL_TASKS_LIMIT),
+    hasMore: z.boolean(),
+  })
+  .strict()
+
+/* ------------------------------------------------------------------ *
+ * Assignable people (PRD 7.1, PRD 12)
+ * ------------------------------------------------------------------ */
+
+/**
+ * One person a deal may be made responsible for.
+ *
+ * `name` carries exactly what `responsibleName` and `assigneeName` carry — the
+ * display name, falling back to the account email — so the picker and the card
+ * name one person identically instead of the form offering an email the card
+ * then renders as something else.
+ *
+ * Deliberately id and name only. This list exists to fill a select; the email,
+ * the role and the creation date belong to the admin console, and a picker is
+ * the wrong place to publish an account inventory.
+ */
+export const assignableUserSchema = z
+  .object({
+    id: z.uuid(),
+    name: z.string(),
+  })
+  .strict()
+
+/**
+ * Who a deal may be handed to (PRD 7.1's «ответственный», PRD 12's future team).
+ *
+ * ADMINISTRATORS ONLY, which is a correctness rule rather than a convenience:
+ *
+ * - the authenticated CRM surface is administrator-only (PRD 3, PRD 10), so
+ *   somebody outside that population could not open the card they were given;
+ * - a notification about an OWNED deal or task goes to that owner alone, and the
+ *   recipient scan behind it is itself filtered to administrators — so assigning
+ *   outside the population turns a working alert into silence.
+ *
+ * Uncapped, unlike every other collection in this file. The others grow with
+ * traffic or with time; this one is the set of promoted accounts and changes only
+ * through the admin console. Truncation is also the one failure a `hasMore` flag
+ * cannot make safe here — a person missing from a picker simply cannot be chosen.
+ */
+export const assignableUsersResponseSchema = z
+  .object({ users: z.array(assignableUserSchema) })
   .strict()
 
 /* ------------------------------------------------------------------ *
@@ -837,11 +956,14 @@ export type LeadAttributionDto = z.infer<typeof leadAttributionSchema>
 export type DealSummaryDto = z.infer<typeof dealSummarySchema>
 export type DealDetailDto = z.infer<typeof dealDetailSchema>
 export type DealDetailResponse = z.infer<typeof dealDetailResponseSchema>
+export type DealDeleteResponse = z.infer<typeof dealDeleteResponseSchema>
 export type DealListPage = z.infer<typeof dealListResponseSchema>
 export type DealBoardColumnDto = z.infer<typeof dealBoardColumnSchema>
 export type DealBoardResponse = z.infer<typeof dealBoardResponseSchema>
 export type CriticalTaskDto = z.infer<typeof criticalTaskSchema>
 export type CriticalTasksResponse = z.infer<typeof criticalTasksResponseSchema>
+export type AssignableUserDto = z.infer<typeof assignableUserSchema>
+export type AssignableUsersResponse = z.infer<typeof assignableUsersResponseSchema>
 export type DashboardRangeDto = z.infer<typeof dashboardRangeSchema>
 export type DashboardFunnelStepDto = z.infer<typeof dashboardFunnelStepSchema>
 export type DashboardSourceDto = z.infer<typeof dashboardSourceSchema>

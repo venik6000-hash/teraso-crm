@@ -3,13 +3,21 @@ import type { MiddlewareHandler } from 'hono'
 import type { DbClient } from '../../db'
 import type { AuthHttpEnv } from '../auth'
 import { CrmService } from './application/crm-service'
-import type { Clock, LeadNotifier } from './application/ports'
+import type { AssignableUsersReader, Clock, LeadNotifier } from './application/ports'
 import { TaskService } from './application/task-service'
 import { createPrismaCrmRepository } from './infrastructure/crm-repository'
 import { createInboundRoutes, type InboundWebhookConfig } from './transport/inbound-routes'
 import { createCrmRoutes } from './transport/routes'
 
 type CreateCrmModuleOptions = {
+  /**
+   * Who a deal may be made responsible for (PRD 7.1). Injected rather than
+   * queried, so the roster of people stays owned by the users context and this
+   * module never writes SQL over somebody else's table. Required, unlike
+   * `notifier`: see `AssignableUsersReader` for why a silent default would hide a
+   * wiring mistake instead of degrading gracefully.
+   */
+  assignableUsers: AssignableUsersReader
   clock?: Clock
   db: DbClient
   /**
@@ -20,6 +28,12 @@ type CreateCrmModuleOptions = {
    * expects.
    */
   notifier?: LeadNotifier
+  /**
+   * The role half of the authenticated CRM guard (PRD 3). It is a separate option
+   * from `requireAuth` because the two are composed in that order on every guarded
+   * path: the session establishes the role the check then reads.
+   */
+  requireAdmin: MiddlewareHandler<AuthHttpEnv>
   requireAuth: MiddlewareHandler<AuthHttpEnv>
   webhook: InboundWebhookConfig
 }
@@ -27,7 +41,7 @@ type CreateCrmModuleOptions = {
 const systemClock: Clock = { now: () => new Date() }
 
 /**
- * Returns the authenticated router, the constructed service and the inbound
+ * Returns the administrator-only router, the constructed service and the inbound
  * webhook router. The two routers share this ONE `CrmService` instance on purpose:
  * Task 5's webhook (`POST /api/crm/inbound/quiz`) is HMAC-signed rather than
  * bearer-authed, and records leads through the same domain rules and clock as the
@@ -36,26 +50,33 @@ const systemClock: Clock = { now: () => new Date() }
  * an exception into that glob or reconstructing the service.
  */
 export function createCrmModule({
+  assignableUsers,
   clock = systemClock,
   db,
   notifier,
+  requireAdmin,
   requireAuth,
   webhook,
 }: CreateCrmModuleOptions) {
   const repository = createPrismaCrmRepository(db)
-  const service = new CrmService({ clock, notifier, repository })
+  const service = new CrmService({ assignableUsers, clock, notifier, repository })
   const taskService = new TaskService({ clock, repository })
   return {
     service,
     taskService,
-    routes: createCrmRoutes({ requireAuth, service, taskService }),
+    routes: createCrmRoutes({ requireAdmin, requireAuth, service, taskService }),
     inboundRoutes: createInboundRoutes({ service, clock, webhook }),
   }
 }
 
 export { CrmService } from './application/crm-service'
 export { TaskService } from './application/task-service'
-export type { CrmRepository, LeadNotifier, NewLeadFact } from './application/ports'
+export type {
+  AssignableUsersReader,
+  CrmRepository,
+  LeadNotifier,
+  NewLeadFact,
+} from './application/ports'
 export type { InboundWebhookConfig } from './transport/inbound-routes'
 
 /**

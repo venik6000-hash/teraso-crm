@@ -49,13 +49,25 @@ export function createApp({
   const notifications = createNotificationsModule({
     backgroundTasks,
     db: prisma,
+    requireAdmin: auth.requireAdmin,
     requireAuth: auth.requireAuth,
     taskOverdueAfterMinutes: env.NOTIFICATION_TASK_OVERDUE_AFTER_MINUTES,
     vapid: vapidConfigFrom(env),
   })
   const crm = createCrmModule({
     db: prisma,
+    // The roster of people a deal may be handed to (PRD 7.1), read through the
+    // users module's own narrow port. The direction mirrors `notifier` below: the
+    // CRM is handed a capability at composition time and imports neither module,
+    // so `db.user` keeps exactly one owner and this line is the whole seam.
+    assignableUsers: users.assignableUsersReader,
     notifier: notifications.leadNotifier,
+    // PRD 3 gives the MVP one руководитель, so the authenticated CRM surface is
+    // administrator-only. The guards travel as a pair because a role check is
+    // meaningless without the session that establishes the role, and the module
+    // composes them rather than deciding the rule for itself. The inbound webhook
+    // this module also builds receives neither: see the mount comment below.
+    requireAdmin: auth.requireAdmin,
     requireAuth: auth.requireAuth,
     // The signing secret is server-only (PRD 10); the two limits fall back to their
     // documented defaults when the optional env vars are unset.
@@ -116,8 +128,19 @@ export function createApp({
     app.use('/api/crm/tasks', middleware)
     app.use('/api/crm/tasks/*', middleware)
     app.use('/api/crm/clients/*', middleware)
-    // The whole notification surface is bearer-authenticated, so unlike the CRM
-    // prefixes above it needs no carve-out for an unauthenticated sibling.
+    // The staff picker is read-only too, and belongs here for the reason the
+    // dashboard does: a path left off this loop silently ships without the body
+    // limit, and being read-only today is not a property the next change keeps.
+    app.use('/api/crm/users', middleware)
+    // The dashboard belongs on this list even though it is read-only: it is the
+    // heaviest query in the product (nine correlated subqueries, two of them
+    // lateral over deal_tasks), so it must not be the one authenticated CRM path
+    // that ships without the shared ingress protection. Note the rate limiter
+    // exempts GET, so today this contributes the body limit and the guarantee
+    // that a future write on this path is covered by default.
+    app.use('/api/crm/dashboard', middleware)
+    // Every path on the notification surface is behind the bearer guard, so unlike
+    // the CRM prefixes above it needs no carve-out for an unauthenticated sibling.
     app.use('/api/notifications', middleware)
     app.use('/api/notifications/*', middleware)
   }
@@ -154,9 +177,10 @@ export function createApp({
   app.route('/api/admin', users.adminRoutes)
   // The HMAC-signed site webhook, mounted as a sibling BEFORE the authenticated CRM
   // router and outside the auth security glob above: it authenticates by signature,
-  // not a bearer token, so it must not inherit `requireAuth`, the auth rate-limiter
-  // or the auth body limit. `crm.routes` defines no `/inbound/*` path, so the two
-  // never collide.
+  // not a bearer token, so it must not inherit `requireAuth`, `requireAdmin`, the
+  // auth rate-limiter or the auth body limit. The site holds a shared secret, not an
+  // account, and there is no administrator behind it to check. `crm.routes` defines
+  // no `/inbound/*` path, so the two never collide.
   app.route('/api/crm/inbound', crm.inboundRoutes)
   app.route('/api/crm', crm.routes)
   app.route('/api/notifications', notifications.routes)

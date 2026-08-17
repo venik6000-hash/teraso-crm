@@ -53,7 +53,7 @@ function createService(overrides: Partial<CrmRepository> = {}) {
     },
     listCriticalTasks: async (at: Date) => {
       calls.listCriticalTasks.push({ now: at })
-      return { items: [] } satisfies CriticalTasksResponse
+      return { items: [], hasMore: false } satisfies CriticalTasksResponse
     },
     ...overrides,
   } as CrmRepository

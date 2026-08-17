@@ -11,8 +11,12 @@ import type {
 } from './crm'
 import {
   ACTIVE_DEAL_STAGES,
+  CRITICAL_TASKS_LIMIT,
   DASHBOARD_SOURCE_LIMIT,
   FUNNEL_TRANSITIONS,
+  OPEN_DEAL_STAGES,
+  assignableUsersResponseSchema,
+  criticalTasksResponseSchema,
   dashboardFunnelStepSchema,
   dashboardPeriodSchema,
   dashboardSchema,
@@ -22,6 +26,7 @@ import {
   dealCreateSchema,
   dealDetailSchema,
   dealListQuerySchema,
+  dealDeleteResponseSchema,
   dealListResponseSchema,
   dealStageChangeSchema,
   dealSummarySchema,
@@ -151,6 +156,9 @@ describe('CRM enums', () => {
       'PREPAYMENT',
       'WON',
       'LOST',
+      // Appended, never inserted: PostgreSQL froze the first six at CREATE TYPE
+      // and `ALTER TYPE ... ADD VALUE` can only extend that order.
+      'ARCHIVED',
     ])
     expect(lossReasonSchema.options).toEqual([
       'WRONG_NUMBER',
@@ -184,6 +192,29 @@ describe('deal stage changes', () => {
   test('refuses a loss reason on a stage that is not a loss', () => {
     expect(() =>
       dealStageChangeSchema.parse({ stage: 'QUALIFIED', lossReason: 'CURIOSITY' }),
+    ).toThrow()
+  })
+
+  /**
+   * Archiving is a parking action, not an outcome: it records no reason and no
+   * money. The payment guard matters most — the dashboard attributes received
+   * money by its own payment date rather than by the deal's stage, so an amount
+   * smuggled in on an archive would be reported to the owner as revenue.
+   */
+  test('archives with nothing but an optional comment', () => {
+    expect(dealStageChangeSchema.parse({ stage: 'ARCHIVED' })).toEqual({ stage: 'ARCHIVED' })
+    expect(
+      dealStageChangeSchema.parse({ stage: 'ARCHIVED', comment: 'Старая заявка, чистим доску' }),
+    ).toEqual({ stage: 'ARCHIVED', comment: 'Старая заявка, чистим доску' })
+
+    expect(() =>
+      dealStageChangeSchema.parse({ stage: 'ARCHIVED', lossReason: 'NO_ANSWER' }),
+    ).toThrow()
+    expect(() =>
+      dealStageChangeSchema.parse({ stage: 'ARCHIVED', prepaymentAmount: '20000.00' }),
+    ).toThrow()
+    expect(() =>
+      dealStageChangeSchema.parse({ stage: 'ARCHIVED', fullPaymentPaidAt: '2026-07-23T09:00:00.000Z' }),
     ).toThrow()
   })
 
@@ -472,7 +503,14 @@ describe('deal activity', () => {
     expect(
       dealActivitySchema.parse({ ...activity, fromStage: null, toStage: 'NEW' }),
     ).toMatchObject({ toStage: 'NEW' })
-    expect(() => dealActivitySchema.parse({ ...activity, toStage: 'ARCHIVED' })).toThrow()
+    // Archiving is a real stage move, so it writes a real typed pair.
+    expect(
+      dealActivitySchema.parse({ ...activity, fromStage: 'WON', toStage: 'ARCHIVED' }),
+    ).toMatchObject({ fromStage: 'WON', toStage: 'ARCHIVED' })
+    // A deliberate non-member, not a stage name held in reserve: this case pins
+    // that the column is enum-typed, and it went quiet the day «ARCHIVED» — the
+    // sentinel it used to use — became a genuine stage.
+    expect(() => dealActivitySchema.parse({ ...activity, toStage: 'NOT_A_STAGE' })).toThrow()
     // The funnel must never depend on a key the metadata bag may or may not have.
     expect(() => dealActivityMetadataSchema.parse({ toStage: 'QUALIFIED' })).toThrow()
   })
@@ -526,6 +564,48 @@ describe('response DTOs', () => {
     expect(() => dealDetailSchema.parse({ ...detail, activities: manyActivities })).toThrow()
     const manyTasks = Array.from({ length: 51 }, () => task)
     expect(() => dealDetailSchema.parse({ ...detail, tasks: manyTasks })).toThrow()
+  })
+
+  /**
+   * The critical queue has no paging and nothing leaves it by itself, so it is
+   * capped like the embedded collections — and `hasMore` is required for the same
+   * reason `hasMoreTasks` is: a producer that truncates cannot omit saying so.
+   */
+  test('cap the critical queue and require it to admit truncation', () => {
+    const item = { task, deal: summary }
+    expect(criticalTasksResponseSchema.parse({ items: [item], hasMore: false })).toEqual({
+      items: [item],
+      hasMore: false,
+    })
+    expect(() => criticalTasksResponseSchema.parse({ items: [item] })).toThrow()
+    expect(() =>
+      criticalTasksResponseSchema.parse({
+        items: Array.from({ length: CRITICAL_TASKS_LIMIT + 1 }, () => item),
+        hasMore: true,
+      }),
+    ).toThrow()
+  })
+
+  /**
+   * The picker carries a display value and nothing else. The account email, the
+   * role and the creation date are the admin console's business, and a producer
+   * that reached for `adminUserSummarySchema` here would publish an account
+   * inventory into a select — which is what the strict object refuses.
+   */
+  test('the assignable-people list carries a display name and no account detail', () => {
+    const users = [{ id: uuid('9'), name: 'Руководитель' }]
+    expect(assignableUsersResponseSchema.parse({ users })).toEqual({ users })
+    // Nobody to assign is an ordinary answer, not a malformed one.
+    expect(assignableUsersResponseSchema.parse({ users: [] })).toEqual({ users: [] })
+    expect(() =>
+      assignableUsersResponseSchema.parse({
+        users: [{ id: uuid('9'), name: 'Руководитель', email: 'owner@teraso.com.ua' }],
+      }),
+    ).toThrow()
+    expect(() =>
+      assignableUsersResponseSchema.parse({ users: [{ id: uuid('9'), name: null }] }),
+    ).toThrow()
+    expect(() => assignableUsersResponseSchema.parse({ items: users })).toThrow()
   })
 })
 
@@ -614,6 +694,23 @@ describe('dashboard report', () => {
     expect(FUNNEL_TRANSITIONS).toHaveLength(ACTIVE_DEAL_STAGES.length - 1)
     // LOST never occupies a column, so it is never a funnel destination either.
     expect(FUNNEL_TRANSITIONS.some((step) => step.toStage === 'LOST')).toBe(false)
+  })
+
+  /**
+   * ARCHIVED is a terminal parking state, not a step of the funnel.
+   *
+   * Both exclusions below are load-bearing rather than tidy. Inside
+   * ACTIVE_DEAL_STAGES it would become a board column AND — because
+   * FUNNEL_TRANSITIONS is derived from that list — a reported «Успех → Архив»
+   * step whose conversion share is meaningless. Inside OPEN_DEAL_STAGES it would
+   * start demanding a next step, so shelving a dead lead would make it critical
+   * instead of quiet.
+   */
+  test('keeps the archive out of the board columns and the funnel', () => {
+    expect(ACTIVE_DEAL_STAGES).not.toContain('ARCHIVED')
+    expect(OPEN_DEAL_STAGES).not.toContain('ARCHIVED')
+    expect(FUNNEL_TRANSITIONS.some((step) => step.toStage === 'ARCHIVED')).toBe(false)
+    expect(FUNNEL_TRANSITIONS.some((step) => step.fromStage === 'ARCHIVED')).toBe(false)
   })
 
   /**
@@ -828,5 +925,27 @@ describe('notification contracts', () => {
     ]) {
       expect(() => notificationSchema.parse({ ...notification, href })).toThrow()
     }
+  })
+})
+
+/**
+ * Deleting a deal erases it, so the response carries the id that is gone rather
+ * than the record: there is nothing left to serialize, and the browser needs the
+ * id to know which cached card to drop.
+ */
+describe('deal deletion', () => {
+  const dealId = '01912d4e-1111-7000-8000-000000000001'
+
+  test('answers with the erased id and nothing else', () => {
+    expect(dealDeleteResponseSchema.parse({ deletedDealId: dealId })).toEqual({
+      deletedDealId: dealId,
+    })
+    expect(() => dealDeleteResponseSchema.parse({ deletedDealId: 'not-a-uuid' })).toThrow()
+    expect(() => dealDeleteResponseSchema.parse({})).toThrow()
+    // Strict, like every other response DTO: a producer that starts answering with
+    // the deal it just erased fails here rather than in a card rendering a ghost.
+    expect(() =>
+      dealDeleteResponseSchema.parse({ deletedDealId: dealId, deal: { id: dealId } }),
+    ).toThrow()
   })
 })

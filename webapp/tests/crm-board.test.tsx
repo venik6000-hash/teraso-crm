@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
   ACTIVE_DEAL_STAGES,
+  CRITICAL_TASKS_LIMIT,
   type DealBoardResponse,
   type DealDetailDto,
   type DealSummaryDto,
@@ -13,6 +14,7 @@ import {
   DEAL_STAGE_LABELS,
   boardDropIntent,
   buildTaskInput,
+  buildTaskRescheduleInput,
   shouldPromptNextStep,
 } from '../src/features/crm/model'
 import { renderInRouter } from './render-in-router'
@@ -94,6 +96,28 @@ test('a drop onto the loss zone asks for a reason', () => {
   expect(boardDropIntent('NEW', 'LOST')).toEqual({ kind: 'loss' })
 })
 
+/**
+ * The archive is its own intent rather than a plain stage drop, so the board
+ * confirms it. It needs no fields — that is what separates it from a loss — but
+ * an accidental drag must not sweep a deal off the board unannounced.
+ *
+ * It is reachable from a closed stage too, and that drop is offered to the
+ * server like any other: the funnel graph is not mirrored here.
+ */
+test('a drop onto the archive zone is confirmed, from any stage', () => {
+  expect(boardDropIntent('NEW', 'ARCHIVED')).toEqual({ kind: 'archive' })
+  expect(boardDropIntent('PREPAYMENT', 'ARCHIVED')).toEqual({ kind: 'archive' })
+  expect(boardDropIntent('WON', 'ARCHIVED')).toEqual({ kind: 'archive' })
+  expect(boardDropIntent('LOST', 'ARCHIVED')).toEqual({ kind: 'archive' })
+  // Already on the shelf: the board ignores it before the server has to refuse.
+  expect(boardDropIntent('ARCHIVED', 'ARCHIVED')).toEqual({ kind: 'ignored' })
+})
+
+/** Leaving the archive is an ordinary drop, judged by the server like the rest. */
+test('a drop out of the archive is offered to the server', () => {
+  expect(boardDropIntent('ARCHIVED', 'NEW')).toEqual({ kind: 'stage', stage: 'NEW' })
+})
+
 test('an ordinary drop commits directly and a drop on the same column does nothing', () => {
   expect(boardDropIntent('NEW', 'QUALIFIED')).toEqual({ kind: 'stage', stage: 'QUALIFIED' })
   expect(boardDropIntent('NEW', 'NEW')).toEqual({ kind: 'ignored' })
@@ -120,6 +144,20 @@ test('renders one column per active stage and never a column for lost deals', as
   }
   // LOST is a drop target below the columns, not a column of its own (PRD 7.3).
   expect(html).toContain('Потеряна')
+})
+
+/**
+ * Both terminal targets sit below the board, and neither is a column. That is
+ * what keeps the archive out of the dashboard funnel, which derives its steps
+ * from the column order — a sixth column would become a reported conversion.
+ */
+test('offers the archive as a drop zone below the board, never as a column', async () => {
+  const html = await renderInRouter(<DealBoard board={board([summary()])} />, '/app/board')
+
+  expect(html).toContain(DEAL_STAGE_LABELS.ARCHIVED)
+  // The hint has to promise reversibility, or the zone reads as a delete.
+  expect(html).toContain('Данные сохранятся')
+  expect(board([summary()]).columns.some((column) => column.stage === 'ARCHIVED')).toBe(false)
 })
 
 test('marks a critical card with words, not colour alone', async () => {
@@ -230,6 +268,26 @@ test('converts the Kyiv time the owner typed into a UTC instant', () => {
 })
 
 /* ------------------------------------------------------------------ *
+ * Reschedule (PRD 6.2, PRD 7.4): «Перенести» on the deal card and the
+ * critical queue both build their payload through this one helper.
+ * ------------------------------------------------------------------ */
+
+test('requires a time before a task can be rescheduled', () => {
+  const missing = buildTaskRescheduleInput('')
+  expect(missing.ok).toBe(false)
+  if (!missing.ok) expect(missing.errors.fields.dueAt).toBe('Укажите дату и время')
+})
+
+/** Same Kyiv-to-UTC conversion `buildTaskInput` uses, so the two cannot disagree. */
+test('converts the Kyiv time the owner typed into a UTC instant when rescheduling', () => {
+  const built = buildTaskRescheduleInput('2026-07-21T12:00')
+  expect(built.ok).toBe(true)
+  if (built.ok) {
+    expect(built.value).toEqual({ dueAt: '2026-07-21T09:00:00.000Z' })
+  }
+})
+
+/* ------------------------------------------------------------------ *
  * Next-step prompt (PRD 7.4)
  * ------------------------------------------------------------------ */
 
@@ -285,6 +343,7 @@ test('stays quiet on a closed deal, which is exempt from the next-step rule', ()
 test('groups the critical queue and names why each deal is in it', async () => {
   const html = await renderInRouter(
     <TaskQueue
+      hasMore={false}
       items={[
         {
           task: task({ dueAt: '2026-07-19T09:00:00.000Z' }),
@@ -298,9 +357,45 @@ test('groups the critical queue and names why each deal is in it', async () => {
   expect(html).toContain('Олена Ковальчук')
   expect(html).toContain('Перезвонить по замеру')
   expect(html).toContain('Требует действия')
+  // A complete queue says nothing about truncation.
+  expect(html).not.toContain('список длиннее')
+})
+
+/**
+ * The queue is capped server-side and nothing ages out of it, so a truncated list
+ * that looked complete would read as «работа сделана» while a backlog waits behind
+ * it. The screen states what is not on it, the way the deal card and the board do.
+ */
+test('says the backlog is longer than the queue when the server truncated it', async () => {
+  const html = await renderInRouter(
+    <TaskQueue hasMore items={[{ task: task(), deal: summary() }]} />,
+    '/app/tasks',
+  )
+
+  expect(html).toContain(`Показаны первые ${CRITICAL_TASKS_LIMIT} задач, список длиннее`)
 })
 
 test('states an empty queue as good news rather than as an error', async () => {
-  const html = await renderInRouter(<TaskQueue items={[]} />, '/app/tasks')
+  const html = await renderInRouter(<TaskQueue hasMore={false} items={[]} />, '/app/tasks')
   expect(html).toContain('Просроченных задач нет')
+})
+
+/**
+ * The queue offers a reschedule next to «Выполнена» so an overdue call can move
+ * instead of close, but stays free of it — and of any cancel control — when the
+ * page does not wire the callback, matching how `onComplete` already works.
+ */
+test('offers a reschedule action only when the page wires it, and never a cancel action', async () => {
+  const items = [{ task: task(), deal: summary() }]
+
+  const withCallbacks = await renderInRouter(
+    <TaskQueue hasMore={false} items={items} onComplete={() => {}} onReschedule={() => {}} />,
+    '/app/tasks',
+  )
+  const readOnly = await renderInRouter(<TaskQueue hasMore={false} items={items} />, '/app/tasks')
+
+  expect(withCallbacks).toContain('Перенести')
+  expect(withCallbacks).not.toContain('Отменить')
+  expect(readOnly).not.toContain('Перенести')
+  expect(readOnly).not.toContain('Выполнена')
 })

@@ -4,7 +4,10 @@ import {
   addDealNote,
   changeDealStage,
   createDeal,
+  deleteDeal,
   getDeal,
+  listAssignableUsers,
+  listCriticalTasks,
   listDeals,
   lookupClient,
   updateDeal,
@@ -60,6 +63,21 @@ function clientSummary() {
   }
 }
 
+function overdueTask() {
+  return {
+    id: TASK_ID,
+    dealId: DEAL_ID,
+    kind: 'CALL',
+    title: 'Перезвонить клиенту',
+    dueAt: '2026-07-20T09:00:00.000Z',
+    status: 'ACTIVE',
+    assigneeUserId: USER_ID,
+    assigneeName: 'owner@teraso.com.ua',
+    completedAt: null,
+    createdAt: '2026-07-20T08:31:00.000Z',
+  }
+}
+
 function dealSummary(overrides: Record<string, unknown> = {}) {
   return {
     id: DEAL_ID,
@@ -73,18 +91,7 @@ function dealSummary(overrides: Record<string, unknown> = {}) {
     potentialAmount: '65000.00',
     responsibleUserId: USER_ID,
     responsibleName: 'owner@teraso.com.ua',
-    nearestActiveTask: {
-      id: TASK_ID,
-      dealId: DEAL_ID,
-      kind: 'CALL',
-      title: 'Перезвонить клиенту',
-      dueAt: '2026-07-20T09:00:00.000Z',
-      status: 'ACTIVE',
-      assigneeUserId: USER_ID,
-      assigneeName: 'owner@teraso.com.ua',
-      completedAt: null,
-      createdAt: '2026-07-20T08:31:00.000Z',
-    },
+    nearestActiveTask: overdueTask(),
     isCritical: true,
     noNextStep: false,
     hasOverdueTask: true,
@@ -303,6 +310,85 @@ test('updateDeal, changeDealStage and addDealNote target the deal subresources',
     `POST /api/crm/deals/${DEAL_ID}/stage`,
     `POST /api/crm/deals/${DEAL_ID}/notes`,
   ])
+})
+
+/**
+ * Deletion is a DELETE on the deal itself, with no body to send and no record to
+ * read back — the id it answers with is what tells the caller which cached card
+ * to drop.
+ */
+test('deleteDeal issues a bodyless DELETE and returns the erased id', async () => {
+  const calls: Recorded[] = []
+  const transport = transportRecording(calls, () => json({ deletedDealId: DEAL_ID }))
+
+  expect(await deleteDeal(transport, DEAL_ID)).toBe(DEAL_ID)
+
+  expect(calls).toHaveLength(1)
+  expect(new URL(calls[0]!.url).pathname).toBe(`/api/crm/deals/${DEAL_ID}`)
+  expect(calls[0]!.method).toBe('DELETE')
+  expect(calls[0]!.body).toBeUndefined()
+})
+
+/**
+ * The response DTO is strict, so a backend that started answering with the deal
+ * it had just erased would fail here rather than repaint a card for a record
+ * that no longer exists.
+ */
+test('deleteDeal refuses a response that is not just the erased id', async () => {
+  const transport = transportRecording([], () => json({ deal: dealDetail() }))
+
+  await expect(deleteDeal(transport, DEAL_ID)).rejects.toThrow()
+})
+
+/**
+ * The critical queue is capped server-side, so the client has to carry the
+ * truncation flag through to the screen — and reject a queue that leaves it out,
+ * since a producer silently dropping it is exactly how a truncated list starts
+ * looking complete.
+ */
+test('listCriticalTasks reads the capped queue together with its truncation flag', async () => {
+  const calls: Recorded[] = []
+  const transport = transportRecording(calls, () =>
+    json({ items: [{ task: overdueTask(), deal: dealSummary() }], hasMore: true }),
+  )
+
+  const queue = await listCriticalTasks(transport)
+
+  expect(new URL(calls[0]!.url).pathname).toBe('/api/crm/tasks/critical')
+  expect(queue.items[0]?.task.id).toBe(TASK_ID)
+  expect(queue.hasMore).toBe(true)
+})
+
+test('listCriticalTasks rejects a queue that does not say whether it was truncated', async () => {
+  const transport = transportRecording([], () => json({ items: [] }))
+  await expect(listCriticalTasks(transport)).rejects.toThrow()
+})
+
+/**
+ * The «Ответственный» picker's options. Who may appear is decided entirely by the
+ * server — administrators only, because the CRM API and the notification fan-out
+ * are both administrator-only — so this reads the list and filters nothing, and
+ * the strict response schema is what refuses an account inventory arriving in its
+ * place.
+ */
+test('listAssignableUsers reads the staff roster and rejects account detail in it', async () => {
+  const calls: Recorded[] = []
+  const users = [{ id: USER_ID, name: 'Руководитель' }]
+  const transport = transportRecording(calls, () => json({ users }))
+
+  expect(await listAssignableUsers(transport)).toEqual(users)
+  expect(new URL(calls[0]!.url).pathname).toBe('/api/crm/users')
+  expect(calls[0]!.method).toBe('GET')
+
+  const leaky = transportRecording([], () =>
+    json({ users: [{ id: USER_ID, name: 'Руководитель', role: 'admin' }] }),
+  )
+  await expect(listAssignableUsers(leaky)).rejects.toThrow()
+})
+
+test('listAssignableUsers reports an empty roster as an empty list, not a failure', async () => {
+  const transport = transportRecording([], () => json({ users: [] }))
+  expect(await listAssignableUsers(transport)).toEqual([])
 })
 
 test('lookupClient encodes the phone and keeps a missing client as an empty result', async () => {
