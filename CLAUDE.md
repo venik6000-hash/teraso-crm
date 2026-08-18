@@ -76,8 +76,11 @@
 ## Git And Remote Policy
 
 - Work on `main`. Do not create, switch to, or suggest new branches without request. When you are asked to commit, commit to `main` — do not create a branch. Committing is still governed by the rule in Safety And Workspace Hygiene: do not commit unless explicitly asked.
-- This repository has no Git remote, and that is intentional. `git remote -v` is empty.
-- Do not add a remote, push, or open pull requests. Repository publication is out of MVP scope; if the user later wants to publish, they must ask for it explicitly and provide the destination.
+- The remote is `origin`, the **private** repository `venik6000-hash/teraso-crm`. It was published on 2026-08-18; before that the project had no remote at all.
+- Do not push unless explicitly asked. Pushing publishes work outside this machine, so it is an outward-facing action like a deployment, not a step in committing.
+- Keep the repository private. The docs describe the production server's layout, its backup schedule, its rate limits and its known weak spots, which is a map for anyone who should not have one. Making it public needs the owner's explicit decision, not an assumption.
+- Do not open pull requests. Work lands on `main` directly, as above.
+- No secret has ever been committed, and the history is clean of the production IP, the owner's addresses and real customer numbers. Keep it that way: a secret pushed once is public even after it is deleted, and the only real fix is rotating it.
 - Inspect `git status --short --branch` before committing so unrelated or generated files are not swept into a commit.
 - Never commit `backend/.env`, `webapp/.env`, `node_modules/`, `.DS_Store`, `.scratch/`, or `backend/src/generated/`. `.gitignore` already covers them; verify with `git diff --cached --name-only` rather than assuming.
 
