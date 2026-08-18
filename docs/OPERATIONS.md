@@ -12,8 +12,9 @@ failures that do not announce themselves.
 Related documents, which this one deliberately does not repeat:
 
 - [CRM_INTEGRATION.md](CRM_INTEGRATION.md) — the site webhook contract: payload,
-  signature, retries, response codes. Give this to whoever maintains
-  `teraso.com.ua`.
+  signature, retries, response codes, and the two sites that send leads —
+  `teraso.com.ua` and the Meta landing on `teraso.in.ua`. Give this to whoever
+  maintains either of them.
 - [DEPLOYMENT.md](DEPLOYMENT.md) — DigitalOcean App Platform specs and the
   release workflow.
 - [LOCAL_DATABASE.md](LOCAL_DATABASE.md) and the root
@@ -62,11 +63,11 @@ Behind a load balancer or CDN, also set `TRUST_PROXY=true` together with
 `do-connecting-ip`). Without it every request looks like it comes from the proxy,
 and the rate limiter in §11.1 meters your whole company as one visitor.
 
-### Site integration — required for leads to arrive from teraso.com.ua
+### Site integration — required for leads to arrive from the sites
 
 | Variable | What it is |
 | --- | --- |
-| `TERASO_WEBHOOK_SECRET` | The shared secret the site signs each lead with. |
+| `TERASO_WEBHOOK_SECRET` | The shared secret each site signs its leads with. |
 | `TERASO_WEBHOOK_MAX_AGE_SECONDS` | Optional. How stale a signature may be. Default 300. |
 | `TERASO_WEBHOOK_BODY_LIMIT_BYTES` | Optional. Maximum payload size. Default 65536. |
 
@@ -84,6 +85,13 @@ openssl rand -hex 32
 Set the identical value on both sides. Rotation is not atomic: while the two
 sides disagree, deliveries fail with `401` and the site's normal retry recovers
 once both match.
+
+**One secret serves both sites.** The endpoint holds a single
+`TERASO_WEBHOOK_SECRET`, so `teraso.com.ua` and `teraso.in.ua` sign with the same
+value and a rotation has to be applied to both hosts — miss one and only that
+site's leads start failing with `401`, which looks like nothing at all until you
+compare the two sites' lead backups against the receipts. The sites stay
+distinguishable by the `source` they send, not by their credentials.
 
 ### Browser push — required for phone/desktop notifications
 
@@ -538,6 +546,14 @@ becomes a regular need, the admin area is where it belongs.
 Every accepted delivery writes an **ingestion receipt**. Look it up by the pair
 the site controls: `source` plus `externalId`.
 
+Start by deciding **which site the lead came from**, because they keep separate
+backups and only one of them will have the row: `teraso.com.ua` appends monthly
+`leads/leads-YYYY-MM.jsonl` under its own document root, and the Meta landing
+appends daily `leads/YYYY-MM-DD.jsonl` under `teraso.in.ua` — outside the
+document root, one level above `www`. A lead missing from the CRM but present in
+neither backup never reached a handler at all, which is a site problem, not a CRM
+one.
+
 ```sql
 SELECT r.source,
        r.external_id,
@@ -547,7 +563,7 @@ SELECT r.source,
        d.stage
 FROM ingestion_receipts r
 JOIN deals d ON d.id = r.deal_id
-WHERE r.source = 'teraso.com.ua'
+WHERE r.source = 'teraso.com.ua'   -- or 'teraso.in.ua' for the Meta landing
   AND r.external_id = 'lead_REDACTED'
 ORDER BY r.created_at DESC;
 ```

@@ -1,9 +1,24 @@
 # Teraso CRM — site integration (quiz webhook)
 
-How the `teraso.com.ua` site delivers a quiz lead to the CRM. The site keeps
-sending leads to mail and Telegram; this webhook is an additional, authenticated
-delivery that writes the lead into the CRM (PRD §8). It is the only public write
-endpoint — everything else requires an authenticated CRM user.
+How Teraso's sites deliver a lead to the CRM. Each site keeps sending leads to
+mail and Telegram; this webhook is an additional, authenticated delivery that
+writes the lead into the CRM (PRD §8). It is the only public write endpoint —
+everything else requires an authenticated CRM user.
+
+**Two sites feed it.** They share a hosting account and nothing else — separate
+document roots, separate `api.php`, separate lead backups, separate deployment
+stories:
+
+| Site | What it is | `source` on every receipt |
+| --- | --- | --- |
+| `teraso.com.ua` | The main site: an Astro build plus `public/api.php`, deployed from the `teraso` repository by GitHub Actions. | `teraso.com.ua` |
+| `teraso.in.ua` | The Meta advertising landing. Served at `meta.teraso.in.ua`, posting cross-origin to `teraso.in.ua/api.php`. Hand-uploaded — **no repository and no automated deploy**, so the file on the host is the only copy. | `teraso.in.ua` |
+
+`source` is the integration's identity, not a display label — the human label for
+the form travels separately in `form`. Deduplication is keyed on
+`[source, externalId]`, and the two sites issue ids in different shapes from
+different generators, so a shared identity would eventually let one site's lead id
+collide with the other's and drop a real lead as a redelivery.
 
 ## Endpoint
 
@@ -304,11 +319,11 @@ concern rather than a path to compromise.
 `POST /api/crm/inbound/quiz` at the WAF or load balancer, sized above the site's
 legitimate retry burst. Operating this is covered in the deployment runbook.
 
-## Site configuration
+## Site configuration — teraso.com.ua
 
-The site half lives in `public/api.php` on `teraso.com.ua`. Two keys in the
-server's `config.php` switch the delivery on, and they are only honoured
-together (see `config.php.example` for the annotated block):
+The site half lives in `public/api.php`. Two keys in the server's `config.php`
+switch the delivery on, and they are only honoured together (see
+`config.php.example` for the annotated block):
 
 | Key | Value |
 | --- | --- |
@@ -331,6 +346,35 @@ makes the backfill below a complete recovery path, not a partial one.
 A messenger tap (`source=contact_click`) is not forwarded. It carries no name or
 phone, so the CRM would have no client to open a card for.
 
+## Site configuration — teraso.in.ua
+
+The landing's handler is `www/api.php` under the `teraso.in.ua` document root. It
+carries the same delivery code — same signature, same retry rules, same
+fail-closed read — with three differences that follow from what that site is:
+
+- **Credentials live outside the document root**, in `crm_config.php` beside the
+  existing `telegram_config.php`, mode `600`. That site has no `config.php` and no
+  `.htaccess` covering one, so a secret inside `www/` would be a file the web
+  server could serve. The file returns `array('url' => …, 'secret' => …)`; the
+  environment variables `TERASO_CRM_WEBHOOK_URL` / `TERASO_CRM_WEBHOOK_SECRET` are
+  read as a fallback. Either way both values are required together, the URL must
+  be HTTPS, and the secret must be at least 32 characters — otherwise delivery is
+  off and mail, Telegram and the on-disk backup carry on untouched.
+- **No structured card fields are derived.** The landing's forms ask only for a
+  name, a phone and a free-text message, so material, area, budget and timing are
+  left empty rather than guessed from the customer's wording — a guess here would
+  disagree with how the importer maps the same row, and one lead would produce two
+  different cards depending on which path delivered it. The text itself travels
+  whole in `note`, so nothing is lost.
+- **There is no repository.** The file was uploaded by hand and no pipeline
+  refreshes it, so an edit must be made on the host and a dated `api.php.bak-*`
+  copy is kept next to it. Verify with `php -l` **before** moving a new version
+  into place; that host serves the file the moment it lands.
+
+Everything else matches teraso.com.ua: the delivery runs after the response has
+been flushed to the visitor, retries the same way, and logs a permanent failure
+with the lead id while the lead stays in that site's own `leads/YYYY-MM-DD.jsonl`.
+
 ## Backfilling history
 
 `POST /api/crm/inbound/quiz` bounds `receivedAt` to seven days in the past, so it
@@ -340,11 +384,21 @@ predate the webhook, or a recovery after a long outage — use the importer:
 ```sh
 bun run --cwd backend import:site-leads -- --dry-run <export>...
 bun run --cwd backend import:site-leads -- <export>...
+bun run --cwd backend import:site-leads -- --source=teraso.in.ua <export>...
 ```
 
-It accepts either the raw `leads-YYYY-MM.jsonl` off the web host or the
+**`--source` must name the site the export came from** and must match what that
+site's webhook sends; it defaults to `teraso.com.ua`. Get it wrong and the rows
+land under an identity no redelivery will ever match, so every one of those leads
+opens a second deal the next time the site delivers it. An unrecognised flag stops
+the run rather than falling back to the default, because a typo in this one
+argument is exactly the mistake that produces a duplicated board.
+
+It accepts either site's backup — the main site's monthly `leads-YYYY-MM.jsonl`
+with flat `utm_source`/`utm_campaign` columns, the landing's daily
+`leads-YYYY-MM-DD.jsonl` with the same values nested under `utm`, or the
 `{ ok, month, leads: [...] }` body that `api.php?action=leads` returns to the
-admin inbox, and it writes through the same `CrmService` as the webhook — same
+admin inbox — and it writes through the same `CrmService` as the webhook — same
 receipt, same «Первично обработать заявку» task, same notification — with the
 clock rewound to each lead's arrival and the `created_at` columns aligned
 afterwards. Run `--dry-run` first: it maps and validates every row and names
@@ -362,7 +416,15 @@ Two details matter when reading its report:
   and similar), filler numbers such as `+380000000000`, and non-Ukrainian numbers
   the CRM's phone identity cannot accept.
 
-Timestamps come from the `lead_id`, which `lead_make_id()` stamps in UTC. Older
-rows without one fall back to the `time` column, which is the host's Europe/Kyiv
-wall clock and is converted with the zone's real offset — verifiable on every row
-that carries both fields, where `time` sits exactly three hours ahead of the id.
+Timestamps come from the `lead_id` when it carries one: `lead_make_id()` on
+teraso.com.ua stamps it in UTC. Everything else falls back to the `time` column —
+older teraso.com.ua rows that predate the stamped id, and every teraso.in.ua row,
+whose id is bare randomness. That column is the host's Europe/Kyiv wall clock with
+no offset recorded, and is converted with the zone's real offset rather than a
+fixed +3, so it stays correct across a DST change.
+
+Kyiv is verified rather than assumed, on both sites. On teraso.com.ua every row
+carrying both fields shows `time` exactly three hours ahead of the id's UTC stamp.
+On teraso.in.ua the backup file name is `gmdate()` while the field is `date()`, so
+the check is the disagreement between them: every row whose `time` reads between
+00:00 and 02:59 — and only those — sits in the file of the previous UTC day.

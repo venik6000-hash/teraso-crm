@@ -39,10 +39,18 @@ import { createPrismaUsersRepository } from '../src/modules/users/infrastructure
  *
  *   bun run --cwd backend import:site-leads -- <path-to-leads.jsonl> [more.jsonl]
  *   bun run --cwd backend import:site-leads -- --dry-run <path-to-leads.jsonl>
+ *   bun run --cwd backend import:site-leads -- --source=teraso.in.ua <path.jsonl>
  *
  * `--dry-run` maps and validates every row and prints the same report without
  * touching the database. Run it first against a fresh export: it names each row
  * the CRM would refuse and why, while the refusal is still cheap to fix.
+ *
+ * `--source` names which site the export came from, and must match what that
+ * site's webhook sends. Two sites feed this CRM — teraso.com.ua and the Meta
+ * landing served from teraso.in.ua — and they write different backups: the first
+ * stores flat `utm_source`/`utm_campaign` columns and a `lead_<utc-stamp>_<rand>`
+ * id, the second nests the same values under `utm` and issues a bare random id.
+ * Both shapes are read here, because both are the same kind of evidence.
  */
 
 const MINUTE_MS = 60_000
@@ -50,12 +58,55 @@ const HOUR_MS = 60 * MINUTE_MS
 const DAY_MS = 24 * HOUR_MS
 
 /**
- * The integration identity written on every receipt. It must match what the live
- * webhook sends (`source: 'teraso.com.ua'` in `api.php`), or a lead imported here
- * and later redelivered by the site would fail to match its own receipt and open a
- * second deal for the same submission.
+ * The site this import assumes when none is named. It is the integration identity
+ * written on every receipt, and it must match what that site's live webhook sends
+ * (`source` in its `api.php`), or a lead imported here and later redelivered would
+ * fail to match its own receipt and open a second deal for the same submission.
  */
-const SITE_SOURCE = 'teraso.com.ua'
+const DEFAULT_SITE_SOURCE = 'teraso.com.ua'
+
+export class ImportArgsError extends Error {}
+
+export type ImportArgs = { dryRun: boolean; paths: string[]; source: string }
+
+export function parseImportArgs(argv: readonly string[]): ImportArgs {
+  let dryRun = false
+  let source = DEFAULT_SITE_SOURCE
+  const paths: string[] = []
+
+  for (const argument of argv) {
+    if (argument === '--dry-run') {
+      dryRun = true
+      continue
+    }
+    if (argument.startsWith('--source=')) {
+      source = argument.slice('--source='.length).trim()
+      continue
+    }
+    // Anything else that looks like a flag is a typo, not a file. Ignoring it
+    // would run the whole import under the DEFAULT source, and every lead of the
+    // other site would open a second deal under a receipt that never matches.
+    if (argument.startsWith('-')) {
+      throw new ImportArgsError(
+        `Unknown option "${argument}". Expected --dry-run or --source=<host>.`,
+      )
+    }
+    paths.push(argument)
+  }
+
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(source)) {
+    throw new ImportArgsError(
+      `--source must be the site's hostname, like ${DEFAULT_SITE_SOURCE}; received "${source}".`,
+    )
+  }
+  if (paths.length === 0) {
+    throw new ImportArgsError(
+      'Usage: bun run --cwd backend import:site-leads -- [--dry-run] [--source=<host>] <leads.jsonl> [...]',
+    )
+  }
+
+  return { dryRun, paths, source }
+}
 
 /** One raw line of the site's lead backup. Every field is optional in practice. */
 type SiteLeadRow = Record<string, unknown>
@@ -188,6 +239,23 @@ function clamp(value: string, max: number): string | undefined {
 }
 
 /**
+ * One click-attribution value, from either backup shape: teraso.com.ua writes the
+ * parameters as flat columns, teraso.in.ua nests the same names under `utm`. The
+ * flat column wins when a row somehow carries both.
+ *
+ * Only the parameters the CRM stores are read. `fbclid` and `wbraid` are in the
+ * teraso.in.ua backup but have no field on the deal, so they stay in the site's
+ * own log rather than being smuggled into a text field the owner reads.
+ */
+function attributionValue(row: SiteLeadRow, key: string): string {
+  const flat = text(row[key])
+  if (flat) return flat
+  const nested = row.utm
+  if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return ''
+  return text((nested as Record<string, unknown>)[key])
+}
+
+/**
  * The CRM material, from the free text the quiz and calculator store.
  *
  * The brand names are not guesses: they are the catalog's own product types in
@@ -280,9 +348,14 @@ function externalIdOf(row: SiteLeadRow, receivedAt: Date, phone: string): string
  * The mapping is the same one `crm_lead_payload()` performs in `api.php`, so a
  * lead imported from the backup and the same lead delivered live produce the same
  * card. Nothing is invented: a field the site did not record is left out.
+ *
+ * `source` is the site the export came from. It becomes the receipt identity and
+ * the fallback landing URL, so the two sites' histories stay distinguishable and
+ * neither can be re-imported under the other's name.
  */
-function toInboundLead(
+export function toInboundLead(
   row: SiteLeadRow,
+  source: string,
 ): { ok: true; lead: InboundQuizLeadInput } | { ok: false; reason: SkipReason; detail?: string } {
   // A messenger tap is an intent, not a submission: it carries no contact, so the
   // CRM would have nobody to open a card for. The site does not forward it either.
@@ -300,27 +373,29 @@ function toInboundLead(
   if (!receivedAt) return { ok: false, reason: 'no-timestamp' }
   const leadId = externalIdOf(row, receivedAt, digits)
 
-  const page = text(row.page)
+  // `page` on teraso.com.ua, `page_url` on teraso.in.ua: the same field, named
+  // differently by two generations of the handler.
+  const page = text(row.page) || text(row.page_url)
   const landing = text(row.landing_url)
   const landingUrl = /^https?:\/\//i.test(page)
     ? page
     : /^https?:\/\//i.test(landing)
       ? landing
-      : 'https://teraso.com.ua/'
+      : `https://${source}/`
 
   const sourceKey = text(row.source)
   const summary = text(row.summary)
   const area = clamp(areaFrom(row, summary), 76)
 
   const attribution = {
-    metaEventId: clamp(text(row.event_id), 180),
-    utmSource: clamp(text(row.utm_source), 120),
-    utmMedium: clamp(text(row.utm_medium), 120),
-    utmCampaign: clamp(text(row.utm_campaign), 180),
-    utmContent: clamp(text(row.utm_content), 180),
-    utmTerm: clamp(text(row.utm_term), 180),
-    gclid: clamp(text(row.gclid), 300),
-    gbraid: clamp(text(row.gbraid), 300),
+    metaEventId: clamp(attributionValue(row, 'event_id'), 180),
+    utmSource: clamp(attributionValue(row, 'utm_source'), 120),
+    utmMedium: clamp(attributionValue(row, 'utm_medium'), 120),
+    utmCampaign: clamp(attributionValue(row, 'utm_campaign'), 180),
+    utmContent: clamp(attributionValue(row, 'utm_content'), 180),
+    utmTerm: clamp(attributionValue(row, 'utm_term'), 180),
+    gclid: clamp(attributionValue(row, 'gclid'), 300),
+    gbraid: clamp(attributionValue(row, 'gbraid'), 300),
   }
   const hasAttribution = Object.values(attribution).some((one) => one !== undefined)
 
@@ -331,7 +406,7 @@ function toInboundLead(
     // Record the absence plainly rather than inventing a customer.
     name: clamp(text(row.name), 120) ?? 'Без імені',
     phone: phone.slice(0, 40),
-    source: SITE_SOURCE,
+    source,
     form: FORM_LABELS[sourceKey] ?? clamp(sourceKey, 80) ?? 'Заявка',
     landingUrl,
     // What the customer wrote, mirroring `crm_lead_payload()` in api.php: the
@@ -439,15 +514,7 @@ async function realignNotifications(db: DbClient, deals: Map<string, Date>) {
 }
 
 async function main() {
-  const args = process.argv.slice(2)
-  const dryRun = args.includes('--dry-run')
-  const paths = args.filter((one) => !one.startsWith('--'))
-
-  if (paths.length === 0) {
-    throw new Error(
-      'Usage: bun run --cwd backend import:site-leads -- [--dry-run] <leads-YYYY-MM.jsonl> [...]',
-    )
-  }
+  const { dryRun, paths, source } = parseImportArgs(process.argv.slice(2))
 
   const databaseUrl = process.env.DATABASE_URL?.trim()
   if (!databaseUrl) throw new Error('DATABASE_URL is required to import site leads')
@@ -458,7 +525,7 @@ async function main() {
   const mapped: Array<{ line: number; lead: InboundQuizLeadInput }> = []
   const skipped: Skipped[] = []
   for (const { line, row } of rows) {
-    const result = toInboundLead(row)
+    const result = toInboundLead(row, source)
     if (result.ok) mapped.push({ line, lead: result.lead })
     else skipped.push({ line, leadId: text(row.lead_id) || '(no lead_id)', reason: result.reason, detail: result.detail })
   }
